@@ -26,4 +26,9 @@ void unix_socket_set_plugin_driver(void *driver);
 // (same overlap protection: plc_claim_transition refuses while TRANSITIONING).
 bool plc_begin_transition(PLCState target);
 
+// Begin a start that is a COLD restart (IEC 61131-3 Figure 9 rule 4): no
+// restore, and the store overwritten with the initial values before scan 1.
+// Same arbitration as plc_begin_transition(PLC_STATE_RUNNING).
+bool plc_begin_cold_start(void);
+
 #endif // UNIX_SOCKET_H

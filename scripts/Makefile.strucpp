@@ -188,10 +188,21 @@ SHIM_HAS_RETAIN := $(strip $(if $(wildcard $(RUNTIME_INC)/iec_retain.hpp),\
                      $(shell $(CXX_BIN) $(PROBE_CXXFLAGS) -fsyntax-only $(RETAIN_PROBE) \
                              > /dev/null 2>&1 && echo 1),))
 
-# The shim's flags are the common set plus the probe's verdict. Nothing else in
-# the build sees this define: the generated TUs come from the same STruC++ that
-# the probe just measured, so they are already internally consistent.
-SHIM_CXXFLAGS := $(CXXFLAGS) $(if $(SHIM_HAS_RETAIN),-DSTRUCPP_SHIM_HAS_RETAIN,)
+# Retain format 2 (migration by name), probed SEPARATELY and only when format 1
+# passed: the same probe file compiled again with its v2 section switched on.
+# A header set with the format-1 API and not the format-2 one is a real state
+# (every editor released before format 2 shipped), and it must keep building
+# with format 1 rather than lose retain or fail the build. Same $(strip) reason
+# as above.
+SHIM_HAS_RETAIN_V2 := $(strip $(if $(SHIM_HAS_RETAIN),\
+                        $(shell $(CXX_BIN) $(PROBE_CXXFLAGS) -DSTRUCPP_RETAIN_PROBE_V2 \
+                                -fsyntax-only $(RETAIN_PROBE) > /dev/null 2>&1 && echo 1),))
+
+# The shim's flags are the common set plus the probes' verdicts. Nothing else in
+# the build sees these defines: the generated TUs come from the same STruC++ that
+# the probes just measured, so they are already internally consistent.
+SHIM_CXXFLAGS := $(CXXFLAGS) $(if $(SHIM_HAS_RETAIN),-DSTRUCPP_SHIM_HAS_RETAIN,) \
+                 $(if $(SHIM_HAS_RETAIN_V2),-DSTRUCPP_SHIM_HAS_RETAIN_V2,)
 
 # Discover every source under core/generated/, at any depth: the top-level TUs
 # STruC++ emitted, plus whatever each resource library carries below its own
@@ -300,6 +311,11 @@ ifeq ($(SHIM_HAS_RETAIN),)
 	@echo "[INFO] RETAIN: (added in STruC++ v0.6.5 / OpenPLC Editor v4.2.12). The program"
 	@echo "[INFO] RETAIN: builds and runs normally, but RETAIN variables will start at"
 	@echo "[INFO] RETAIN: their initial values on every start. Update the editor to keep them."
+else ifeq ($(SHIM_HAS_RETAIN_V2),)
+	@echo "[INFO] RETAIN: this program's STruC++ runtime headers predate retain migration by"
+	@echo "[INFO] RETAIN: name. Retained values are kept while the retained variables stay the"
+	@echo "[INFO] RETAIN: same; adding, removing or retyping one starts them all at their"
+	@echo "[INFO] RETAIN: initial values. Update the editor to keep them across such changes."
 endif
 	$(CXX) $(SHIM_CXXFLAGS) -c $< -o $@
 

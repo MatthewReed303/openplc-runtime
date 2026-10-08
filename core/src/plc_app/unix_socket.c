@@ -14,6 +14,7 @@
 
 #include "../drivers/plugin_driver.h"
 #include "debug_handler.h"
+#include "plc_retain.h"
 #include "plc_state_manager.h"
 #include "plc_switch.h"
 #include "scan_cycle_manager.h"
@@ -130,6 +131,8 @@ static void *transition_worker(void *arg)
     return NULL;
 }
 
+static bool perform_claimed_transition(PLCState target);
+
 // Start a background thread that performs the (potentially slow) state
 // transition. Returns false when the request was refused; otherwise the
 // transition is under way (or, if the worker could not be spawned, has already
@@ -155,7 +158,27 @@ bool plc_begin_transition(PLCState target)
     {
         return false;
     }
+    return perform_claimed_transition(target);
+}
 
+// A start that is a COLD restart (IEC 61131-3 Figure 9 rule 4): every RETAIN
+// and NON_RETAIN variable initialized, and the stored retained values replaced
+// by the initial ones before the first scan. Arbitrated exactly like any start
+// -- same claim, same refusals -- and armed only once the claim is ours, so the
+// mark belongs to this start and to no other (see plc_arm_cold_start).
+bool plc_begin_cold_start(void)
+{
+    if (!plc_claim_transition(PLC_STATE_RUNNING))
+    {
+        return false;
+    }
+    plc_arm_cold_start();
+    return perform_claimed_transition(PLC_STATE_RUNNING);
+}
+
+// The transition is claimed: hand it to a worker, or complete it here.
+static bool perform_claimed_transition(PLCState target)
+{
     // Claimed but the worker cannot be spawned: run the transition on this thread
     // rather than publishing a landing.
     //
@@ -251,6 +274,17 @@ static void format_switch_response(char *response, size_t response_size)
         strncpy(response, "SWITCH:STOP\n", response_size);
 }
 
+// What the last start did with retained values, as RETAIN:<json>. A read of a
+// snapshot under its own lock, so it is answered mid-transition like STATUS.
+static void format_retain_response(char *response, size_t response_size)
+{
+    char json[1024];
+    if (plc_retain_status_json(json, sizeof(json)) > 0)
+        snprintf(response, response_size, "RETAIN:%s\n", json);
+    else
+        strncpy(response, "RETAIN:ERROR\n", response_size);
+}
+
 void handle_unix_socket_commands(const char *command, char *response, size_t response_size)
 {
     // While a state transition is in progress, only allow the reads: you cannot
@@ -276,6 +310,10 @@ void handle_unix_socket_commands(const char *command, char *response, size_t res
         else if (strcmp(command, "SWITCH") == 0)
         {
             format_switch_response(response, response_size);
+        }
+        else if (strcmp(command, "RETAIN") == 0)
+        {
+            format_retain_response(response, response_size);
         }
         else
         {
@@ -335,6 +373,36 @@ void handle_unix_socket_commands(const char *command, char *response, size_t res
             strncpy(response, "START:ERROR_ALREADY_RUNNING\n", response_size);
             log_error("Received START command but PLC is already RUNNING");
         }
+    }
+    else if (strcmp(command, "COLD_START") == 0)
+    {
+        // START, as a cold restart. Same preconditions and the same refusals as
+        // START, so a client can treat the two replies alike. From RUNNING it is
+        // refused rather than turned into a stop-then-start: a cold restart
+        // throws away retained values, and doing that to a running machine
+        // should take a deliberate STOP first.
+        PLCState current_state = plc_get_state();
+        if (!plc_switch_allows_run())
+        {
+            strncpy(response, "COLD_START:ERROR_SWITCH_STOP\n", response_size);
+            log_warn("Received COLD_START command but the mode switch is in STOP");
+        }
+        else if (current_state != PLC_STATE_RUNNING)
+        {
+            if (plc_begin_cold_start())
+                strncpy(response, "COLD_START:OK\n", response_size);
+            else
+                strncpy(response, "COLD_START:ERROR\n", response_size);
+        }
+        else
+        {
+            strncpy(response, "COLD_START:ERROR_ALREADY_RUNNING\n", response_size);
+            log_error("Received COLD_START command but PLC is already RUNNING");
+        }
+    }
+    else if (strcmp(command, "RETAIN") == 0)
+    {
+        format_retain_response(response, response_size);
     }
     else if (strcmp(command, "STATS") == 0)
     {

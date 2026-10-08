@@ -74,6 +74,17 @@ typedef int (*plugin_get_stats_func_t)(char *out, size_t out_size);
  * commit it alongside the blob on the next `retain_save`, so a load never
  * mutates storage and identity and bytes are written as one unit.
  *
+ * `cap` is the CALLER's buffer capacity (PLC_RETAIN_BLOB_MAX, 65535), which is
+ * usually larger than the running program's blob: a blob an older program
+ * wrote may be bigger and is still migrated by name, so a store must never
+ * refuse a stored blob for being larger than this program's blob. If what it
+ * holds does not fit `cap`, return PLC_RETAIN_STORE_TOO_LARGE (4, as
+ * baremetal's OPLC_RETAIN_TOO_LARGE) and set `*out_len` to the stored length.
+ *
+ * A cold restart (IEC 61131-3 Figure 9 rule 4) uses the same three hooks: the
+ * runtime calls `retain_load` (for the identity) and discards what it returns,
+ * then `retain_save` with the initial values, then `retain_flush`.
+ *
  * Both save and load must be exported for the plugin to be used as the store; a
  * plugin exporting only one is ignored, since a store that can save and not
  * load is worse than none. Return 0 on success, non-zero otherwise.

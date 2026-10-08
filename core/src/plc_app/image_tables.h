@@ -108,6 +108,22 @@ extern "C"
                                                       uint8_t (*write_leaf)(uint8_t, uint16_t,
                                                                             const uint8_t *, uint16_t));
 
+    /* Retain format 2 (STruC++ retain migration by name). Same division of
+     * labour as above, plus a table of the stored variables so a changed
+     * layout is migrated by name rather than refused. `unpack2` fills a
+     * 24-byte report (plc_retain_report_t) with what it kept, converted,
+     * added, dropped and refused; `report` may be NULL.
+     *
+     * Optional, and used only when all three resolve: a .so built against a
+     * header set without the v2 API exports just the four above, and the
+     * runtime then takes exactly the format-1 path it always took. */
+    extern size_t   (*ext_strucpp_retain_blob_size2)(void);
+    extern size_t   (*ext_strucpp_retain_pack2)     (uint8_t *out, size_t cap);
+    extern uint8_t  (*ext_strucpp_retain_unpack2)   (const uint8_t *blob, size_t len,
+                                                     uint8_t (*write_leaf)(uint8_t, uint16_t,
+                                                                           const uint8_t *, uint16_t),
+                                                     void *report, size_t report_size);
+
     /* Located-variable classifier. Reports whether a debug (arr, elem) leaf is
      * a LOCATED variable and, if so, its image location (area / size /
      * byte_index / bit_index). Returns 1 + fills the out-params if located, 0

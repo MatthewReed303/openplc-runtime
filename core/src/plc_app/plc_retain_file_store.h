@@ -80,7 +80,11 @@ const char *plc_retain_file_store_path(void);
  * whether the bytes on disk still belong to it — a file labelled with a
  * different program is removed and reported empty. See the plugin contract in
  * plugin_driver.h; this store is one implementation of it, not a special case
- * beside it. */
+ * beside it.
+ *
+ * `cap` on load is the caller's buffer, not the program's blob size; a stored
+ * blob larger than `cap` is answered with PLC_RETAIN_STORE_TOO_LARGE and its
+ * length in *out_len, never truncated. */
 int plc_retain_file_store_save(const uint8_t *blob, uint16_t len);
 int plc_retain_file_store_load(const char *program_md5, uint16_t md5_len, uint8_t *out,
                                uint16_t cap, uint16_t *out_len);

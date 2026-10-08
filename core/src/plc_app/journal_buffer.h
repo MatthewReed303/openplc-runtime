@@ -238,6 +238,16 @@ void journal_force_clear(journal_buffer_type_t type, uint16_t index,
                          uint8_t bit);
 
 /**
+ * @brief Release every forced image slot at once
+ *
+ * For a cold restart: the bitmap belongs to the runtime and outlives a program
+ * unload, unlike the forces held inside the program's own variables.
+ *
+ * @note Same calling constraint as journal_force_set (under image_lock).
+ */
+void journal_force_clear_all(void);
+
+/**
  * @brief Apply all pending journal entries to image tables and clear the journal
  *
  * This function should be called at the start of each PLC scan cycle,

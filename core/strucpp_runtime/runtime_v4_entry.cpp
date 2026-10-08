@@ -43,6 +43,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <pthread.h>
 
 // External linkage so generated_debug.cpp can reference &g_config.X.Y at
@@ -234,5 +235,88 @@ extern "C" uint8_t strucpp_retain_unpack(
     return static_cast<uint8_t>(
         strucpp::retain::unpack(blob, len, write_leaf, retain_size_leaf));
 }
+
+// ---------------------------------------------------------------------------
+// Retain format 2: migration by name.
+//
+// GATED SEPARATELY, on its own probe (STRUCPP_SHIM_HAS_RETAIN_V2, see
+// scripts/Makefile.strucpp): a header set can have the format-1 API above and
+// not this one, and such an upload must still build and keep format 1. The
+// runtime uses these three only when all of them resolve.
+//
+// A format-2 blob carries a table naming every stored variable, so when the
+// retained variables change (one added, removed, retyped, reordered) the
+// values of those that still exist are restored by name, as IEC 61131-3
+// 6.5.6.1 rule 1 expects of a warm restart, instead of the whole blob being
+// refused. The matching and the conversion rules live in iec_retain.hpp; this
+// file only wires the leaf accessors to them.
+//
+// Same split as format 1: reads and the leaf table come from this .so, and the
+// SCALAR write is the runtime's callback, because a retained variable may also
+// be located and must go through the image journal. Strings use
+// handle_write_text directly: a STRING/WSTRING is never located, and restore
+// runs before any task is released.
+//
+// Anything added here that touches a v2 name MUST stay inside this #ifdef and
+// be mirrored into retain_probe.cpp's STRUCPP_RETAIN_PROBE_V2 section (pinned by
+// tests/pytest/compile/test_retain_capability_probe.py).
+// ---------------------------------------------------------------------------
+#ifdef STRUCPP_SHIM_HAS_RETAIN_V2
+
+static_assert(sizeof(strucpp::retain::Report) == 24,
+              "the runtime mirrors Report as a 24-byte C struct (plc_retain_report_t)");
+
+// Packing and sizing never write a variable. A refusing stand-in rather than a
+// null pointer, so a header set that ever did call it fails safe.
+static uint8_t retain_no_write(uint8_t, uint16_t, const uint8_t*, uint16_t) {
+    return 0x82;
+}
+
+static strucpp::retain::Host retain_host(strucpp::retain::WriteLeaf write) {
+    strucpp::retain::Host host{};
+    host.leaf       = strucpp::debug::handle_retain_leaf;
+    host.read       = retain_read_leaf;
+    host.write      = write ? write : retain_no_write;
+    host.read_text  = strucpp::debug::handle_read_text;
+    host.write_text = strucpp::debug::handle_write_text;
+    host.wire_size  = retain_size_leaf;
+    return host;
+}
+
+/** Bytes a full format-2 blob occupies (header, payload, table); 0 when nothing is retained. */
+extern "C" size_t strucpp_retain_blob_size2(void) {
+    return strucpp::retain::blob_size2(retain_host(retain_no_write));
+}
+
+/** Serialise every retained leaf as format 2. Returns bytes written, 0 on failure. */
+extern "C" size_t strucpp_retain_pack2(uint8_t* out, size_t cap) {
+    return strucpp::retain::pack2(out, cap, retain_host(retain_no_write));
+}
+
+/**
+ * Restore from a format-1 or format-2 blob, writing scalars through the
+ * runtime's callback.
+ *
+ * Returns `strucpp::retain::LoadResult` as a byte; only Ok (0) and Migrated (7)
+ * wrote anything. `report` (may be NULL) receives min(report_size, 24) bytes
+ * of `strucpp::retain::Report`: what was kept, converted, added, dropped and
+ * refused, and the two layout hashes.
+ */
+extern "C" uint8_t strucpp_retain_unpack2(
+    const uint8_t* blob,
+    size_t len,
+    uint8_t (*write_leaf)(uint8_t arr, uint16_t elem, const uint8_t* bytes, uint16_t n),
+    void* report,
+    size_t report_size) {
+    strucpp::retain::Report r{};
+    const strucpp::retain::LoadResult res =
+        strucpp::retain::unpack2(blob, len, retain_host(write_leaf), &r);
+    if (report != nullptr && report_size != 0) {
+        std::memcpy(report, &r, report_size < sizeof(r) ? report_size : sizeof(r));
+    }
+    return static_cast<uint8_t>(res);
+}
+
+#endif // STRUCPP_SHIM_HAS_RETAIN_V2
 
 #endif // STRUCPP_SHIM_HAS_RETAIN

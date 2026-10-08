@@ -262,6 +262,13 @@ void journal_force_clear(journal_buffer_type_t type, uint16_t index, uint8_t bit
     }
 }
 
+/* Release every forced slot. Under image_lock, like the two above. */
+void journal_force_clear_all(void)
+{
+    memset(g_forced, 0, sizeof(g_forced));
+    g_force_count = 0;
+}
+
 #if JOURNAL_LOCKFREE
 
 /*

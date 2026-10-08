@@ -7,6 +7,7 @@ import socket
 import subprocess
 import threading
 import time
+from typing import Optional
 
 # psutil is optional - not available on MSYS2/Cygwin platforms
 try:
@@ -339,6 +340,42 @@ class RuntimeManager:
         except Exception as e:
             logger.error("Failed to stop PLC runtime (unexpected): %s", e)
             return "STOP:ERROR\n"
+
+    def cold_start_plc(self) -> str:
+        """
+        Send COLD_START: start the PLC as a COLD restart.
+
+        IEC 61131-3 Figure 9 rule 4: every RETAIN and NON_RETAIN variable
+        starts at its initial value, and the stored retained values are
+        replaced by the initial ones before the first scan. Same preconditions
+        and reply shape as START (``COLD_START:OK``,
+        ``COLD_START:ERROR_ALREADY_RUNNING``, ``COLD_START:ERROR_SWITCH_STOP``,
+        ``COLD_START:ERROR``); a running PLC must be stopped first.
+        """
+        try:
+            return self.runtime_socket.send_and_receive("COLD_START\n")
+        except (OSError, socket.error) as e:
+            logger.error("Failed to cold-start PLC runtime: %s", e)
+            return "COLD_START:ERROR\n"
+        except Exception as e:
+            logger.error("Failed to cold-start PLC runtime (unexpected): %s", e)
+            return "COLD_START:ERROR\n"
+
+    def retain_status(self) -> Optional[str]:
+        """
+        Send RETAIN: what the last start did with retained values.
+
+        Answers ``RETAIN:<json>`` (see plc_retain_status_json in the runtime),
+        or None when the runtime cannot be reached.
+        """
+        try:
+            return self.runtime_socket.send_and_receive("RETAIN\n")
+        except (OSError, socket.error) as e:
+            logger.error("Failed to get retain status: %s", e)
+            return None
+        except Exception as e:
+            logger.error("Failed to get retain status (unexpected): %s", e)
+            return None
 
     def status_plc(self):
         """

@@ -45,6 +45,13 @@ extern "C" {
 #include "utils/utils.h"
 
 static PLCState         plc_state    = PLC_STATE_STOPPED;
+
+/* Cold restart (IEC 61131-3 Figure 9 rule 4). `armed` is set after a start is
+ * claimed and taken by plc_set_state(RUNNING) on every path; `this_start_cold`
+ * is written there before plc_cycle_thread is created and only read by it, so
+ * the thread creation orders the two. See plc_arm_cold_start(). */
+static std::atomic<bool> g_cold_start_armed{false};
+static bool              g_this_start_cold = false;
 static pthread_mutex_t  state_mutex  = PTHREAD_MUTEX_INITIALIZER;
 
 struct timespec  timer_start;
@@ -480,7 +487,29 @@ void *plc_cycle_thread(void *arg)
      * are no-ops when retain is not in play. read() applies every value before
      * the first task is released, so scan 1 already sees the retained state. */
     plc_retain_init();
-    plc_retain_read();
+    if (g_this_start_cold)
+    {
+        /* COLD restart, IEC 61131-3 Figure 9 rule 4: every RETAIN and
+         * NON_RETAIN variable initialized. The .so was just loaded, so every
+         * variable already holds its declared initial value (6.5.6.2); what a
+         * cold restart adds is to skip the restore and make the store hold the
+         * initial values too.
+         *
+         * Located forces are released as well. Variable forces live in the .so
+         * and went with the unload, but the image's forced-slot bitmap is the
+         * runtime's and outlives it, so a forced located slot would otherwise
+         * hand scan 1 something other than the initial value a cold restart
+         * promises. */
+        log_info("Cold restart: every variable starts at its initial value");
+        image_lock();
+        journal_force_clear_all();
+        image_unlock();
+        plc_retain_cold_start();
+    }
+    else
+    {
+        plc_retain_read();
+    }
 
     if (plugin_driver)
     {
@@ -1280,6 +1309,11 @@ extern "C" bool plc_publish_running_if_claimed(void)
     return true;
 }
 
+extern "C" void plc_arm_cold_start(void)
+{
+    g_cold_start_armed.store(true);
+}
+
 extern "C" bool plc_set_state(PLCState new_state)
 {
     // Performs a transition already claimed via plc_claim_transition(), which
@@ -1297,6 +1331,12 @@ extern "C" bool plc_set_state(PLCState new_state)
 
     if (new_state == PLC_STATE_RUNNING)
     {
+        /* Taken here, before anything can fail, so the mark is consumed by the
+         * start it was armed for whether or not that start succeeds. Published
+         * to plc_cycle_thread through g_this_start_cold, which is written before
+         * load_plc_program creates that thread. */
+        g_this_start_cold = g_cold_start_armed.exchange(false);
+
         if (plc_program == NULL)
         {
             char *libplc_path = find_libplc_file(libplc_build_dir);

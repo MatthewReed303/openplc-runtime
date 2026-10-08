@@ -873,6 +873,8 @@ def restapi_plc_get(command):
         enum:
           - start-plc
           - stop-plc
+          - cold-start-plc
+          - retain-status
           - status
           - ping
           - runtime-logs
@@ -882,6 +884,9 @@ def restapi_plc_get(command):
           Command to execute:
           - start-plc: Start the PLC runtime
           - stop-plc: Stop the PLC runtime
+          - cold-start-plc: Start as a cold restart (every variable, RETAIN included,
+            at its initial value; the stored retained values are overwritten)
+          - retain-status: What the last start did with retained values
           - status: Get PLC status (optional query param include_stats=true)
           - ping: Check if runtime is responsive
           - runtime-logs: Get runtime logs (optional query params: id, level)

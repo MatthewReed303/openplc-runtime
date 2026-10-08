@@ -107,6 +107,50 @@ def handle_stop_plc(data: dict) -> dict:
     return {"status": response}
 
 
+def handle_cold_start_plc(data: dict) -> dict:
+    """
+    Start the PLC as a COLD restart (IEC 61131-3 Figure 9 rule 4).
+
+    Every RETAIN and NON_RETAIN variable starts at its declared initial value,
+    and the stored retained values are overwritten with those before the first
+    scan, so a later warm start or a power cut cannot bring them back. Same
+    reply shape as start-plc; refused while running, so throwing retained
+    values away always takes a deliberate stop first.
+    """
+    response = runtime_manager.cold_start_plc()
+    return {"status": response}
+
+
+def parse_retain_status(retain_response: Optional[str]) -> Optional[dict]:
+    """
+    Parse the RETAIN response from the runtime: ``RETAIN:<json>``.
+    Returns the decoded object, or None when the response is unusable.
+    """
+    if retain_response is None:
+        return None
+    value = retain_response.strip()
+    if not value.startswith("RETAIN:{"):
+        return None
+    try:
+        parsed = json.loads(value[len("RETAIN:") :])
+    except json.JSONDecodeError as e:
+        logger.warning("Unparseable RETAIN response %r: %s", value, e)
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def handle_retain_status(data: dict) -> dict:
+    """
+    What the last PLC start did with retained values: warm or cold, the
+    restore result, and for a migrated layout how many values were kept,
+    converted, added, dropped and refused.
+    """
+    retain = parse_retain_status(runtime_manager.retain_status())
+    if retain is None:
+        return {"error": "No retain status from runtime"}
+    return {"retain": retain}
+
+
 def handle_runtime_logs(data: dict) -> dict:
     if "id" in data:
         min_id = int(data["id"])
@@ -242,6 +286,8 @@ def handle_switch(data: dict) -> dict:
 GET_HANDLERS: dict[str, Callable[[dict], dict]] = {
     "start-plc": handle_start_plc,
     "stop-plc": handle_stop_plc,
+    "cold-start-plc": handle_cold_start_plc,
+    "retain-status": handle_retain_status,
     "runtime-logs": handle_runtime_logs,
     "compilation-status": handle_compilation_status,
     "status": handle_status,

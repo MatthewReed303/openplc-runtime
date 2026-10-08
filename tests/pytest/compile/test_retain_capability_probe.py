@@ -29,6 +29,13 @@ when it cannot supply the API. These tests pin the three ways that gate can rot.
 3. **The probe covers what the shim uses.** A probe that checks less than the
    shim calls would pass for a header set the shim cannot compile against --
    turning a clear build error into a confusing one.
+
+Retain format 2 (migration by name) repeats all three for a SECOND gate,
+``STRUCPP_SHIM_HAS_RETAIN_V2``, measured by the same probe compiled again with
+``-DSTRUCPP_RETAIN_PROBE_V2``. A header set with the format-1 API and not the
+format-2 one is every editor released before format 2, and it must keep
+building with format 1 -- so the two verdicts are independent, and the v2 one is
+only taken when the v1 one passed.
 """
 
 import re
@@ -52,6 +59,20 @@ _RETAIN_NAMES = (
     "strucpp::retain::pack",
     "strucpp::retain::unpack",
     "strucpp::debug::retain_layout_hash",
+)
+
+# Every name the shim's format-2 block uses that only a format-2 header set can
+# satisfy. These must sit inside `#ifdef STRUCPP_SHIM_HAS_RETAIN_V2`, and the
+# probe's v2 section must touch every one.
+_RETAIN_V2_NAMES = (
+    "strucpp::retain::Host",
+    "strucpp::retain::Report",
+    "strucpp::retain::blob_size2",
+    "strucpp::retain::pack2",
+    "strucpp::retain::unpack2",
+    "strucpp::debug::handle_retain_leaf",
+    "strucpp::debug::handle_read_text",
+    "strucpp::debug::handle_write_text",
 )
 
 # --- header stubs ----------------------------------------------------------
@@ -127,26 +148,120 @@ inline LoadResult unpack(const uint8_t* blob, size_t len,
 """
 
 
-def _header_set(root: Path, *, capable: bool) -> Path:
-    """Write a stub `strucpp_runtime/include` and return it."""
+# Format 2 adds the per-leaf table accessor to debug_table.hpp...
+_DEBUG_TABLE_V2 = (
+    _DEBUG_TABLE_CAPABLE
+    + """
+namespace strucpp {
+namespace debug {
+struct RetainLeafInfo {
+    uint8_t arr; uint16_t elem; uint32_t id; int32_t index; uint8_t tag; uint8_t cap;
+};
+}  // namespace debug
+}  // namespace strucpp
+"""
+)
+
+# ...the debug accessors every header set has (debug_dispatch.hpp)...
+_DEBUG_DISPATCH_COMMON = """
+#pragma once
+#include <cstdint>
+#include "debug_table.hpp"
+namespace strucpp {
+namespace debug {
+inline uint16_t handle_read(uint8_t, uint16_t, uint8_t*) noexcept { return 0; }
+inline uint16_t handle_size(uint8_t, uint16_t) noexcept { return 0; }
+inline uint8_t handle_write(uint8_t, uint16_t, const uint8_t*, uint16_t) noexcept { return 0; }
+}  // namespace debug
+}  // namespace strucpp
+"""
+
+# ...plus the three format 2 adds: the leaf table and the string accessors.
+_DEBUG_DISPATCH_V2 = (
+    _DEBUG_DISPATCH_COMMON
+    + """
+namespace strucpp {
+namespace debug {
+inline bool handle_retain_leaf(uint16_t, RetainLeafInfo*) noexcept { return false; }
+inline uint16_t handle_read_text(uint8_t, uint16_t, uint8_t*, uint16_t) noexcept { return 0; }
+inline uint8_t handle_write_text(uint8_t, uint16_t, const uint8_t*, uint16_t) noexcept {
+    return 0;
+}
+}  // namespace debug
+}  // namespace strucpp
+"""
+)
+
+# The format-2 iec_retain.hpp: the format-1 entry points unchanged, plus the
+# Host record, the 24-byte Report and the three *2 entry points.
+_IEC_RETAIN_V2 = """
+#pragma once
+#include <cstddef>
+#include <cstdint>
+#include "debug_table.hpp"
+namespace strucpp {
+namespace retain {
+enum class LoadResult : uint8_t { Ok = 0, Empty = 1, StaleLayout = 5, Migrated = 7, BadTrailer = 8 };
+using ReadLeaf = uint16_t (*)(uint8_t, uint16_t, uint8_t*);
+using WriteLeaf = uint8_t (*)(uint8_t, uint16_t, const uint8_t*, uint16_t);
+using SizeLeaf = uint16_t (*)(uint8_t, uint16_t);
+using LeafAt = bool (*)(uint16_t, debug::RetainLeafInfo*);
+using ReadText = uint16_t (*)(uint8_t, uint16_t, uint8_t*, uint16_t);
+using WriteText = uint8_t (*)(uint8_t, uint16_t, const uint8_t*, uint16_t);
+struct Host {
+    LeafAt leaf; ReadLeaf read; WriteLeaf write;
+    ReadText read_text; WriteText write_text; SizeLeaf wire_size;
+};
+struct Report {
+    uint8_t result; uint8_t format;
+    uint16_t kept, converted, truncated, added, dropped, refused, _pad;
+    uint32_t stored_layout; uint32_t program_layout;
+};
+inline size_t blob_size(SizeLeaf) noexcept { return 0; }
+inline size_t pack(uint8_t*, size_t, ReadLeaf, SizeLeaf) noexcept { return 0; }
+inline LoadResult unpack(const uint8_t*, size_t, WriteLeaf, SizeLeaf) noexcept {
+    return LoadResult::Ok;
+}
+inline size_t blob_size2(const Host&) noexcept { return 0; }
+inline size_t pack2(uint8_t*, size_t, const Host&) noexcept { return 0; }
+inline LoadResult unpack2(const uint8_t*, size_t, const Host&, Report*) noexcept {
+    return LoadResult::Ok;
+}
+}  // namespace retain
+}  // namespace strucpp
+"""
+
+
+def _header_set(root: Path, *, capable: bool, v2: bool = False, v2_dispatch: bool = True) -> Path:
+    """Write a stub `strucpp_runtime/include` and return it.
+
+    `capable` is the format-1 API (v0.6.5+), `v2` adds format 2. `v2_dispatch`
+    False models a half-ported header set: iec_retain.hpp has format 2 but
+    debug_dispatch.hpp lacks the accessors the shim wires into it.
+    """
     include = root / "strucpp_runtime" / "include"
     include.mkdir(parents=True)
-    (include / "debug_table.hpp").write_text(
-        _DEBUG_TABLE_CAPABLE if capable else _DEBUG_TABLE_COMMON, encoding="utf-8"
-    )
-    (include / "iec_retain.hpp").write_text(
-        _IEC_RETAIN_CAPABLE if capable else _IEC_RETAIN_LEGACY, encoding="utf-8"
-    )
+    if v2:
+        table, retain = _DEBUG_TABLE_V2, _IEC_RETAIN_V2
+        dispatch = _DEBUG_DISPATCH_V2 if v2_dispatch else _DEBUG_DISPATCH_COMMON
+    else:
+        table = _DEBUG_TABLE_CAPABLE if capable else _DEBUG_TABLE_COMMON
+        retain = _IEC_RETAIN_CAPABLE if capable else _IEC_RETAIN_LEGACY
+        dispatch = _DEBUG_DISPATCH_COMMON
+    (include / "debug_table.hpp").write_text(table, encoding="utf-8")
+    (include / "iec_retain.hpp").write_text(retain, encoding="utf-8")
+    (include / "debug_dispatch.hpp").write_text(dispatch, encoding="utf-8")
     return include
 
 
-def _run_probe(include: Path) -> subprocess.CompletedProcess:
-    """The probe exactly as Makefile.strucpp runs it."""
+def _run_probe(include: Path, *, v2: bool = False) -> subprocess.CompletedProcess:
+    """The probe exactly as Makefile.strucpp runs it (`v2`: the second pass)."""
     return subprocess.run(
         [
             _CXX,
             "-std=c++17",
             "-DSTRUCPP_THREADED",
+            *(["-DSTRUCPP_RETAIN_PROBE_V2"] if v2 else []),
             "-I",
             str(include),
             "-fsyntax-only",
@@ -198,23 +313,65 @@ def test_a_missing_iec_retain_header_is_not_a_build_failure(tmp_path):
     assert _run_probe(include).returncode != 0
 
 
+@pytest.mark.skipif(_CXX is None, reason="no C++ compiler on PATH")
+def test_the_v2_probe_fails_against_a_format_1_header_set(tmp_path):
+    """Every editor released before format 2: format 1 yes, format 2 no."""
+    include = _header_set(tmp_path, capable=True)
+
+    assert _run_probe(include).returncode == 0, "format 1 must still be detected"
+    result = _run_probe(include, v2=True)
+    assert result.returncode != 0, "v2 probe accepted a header set with no format-2 API"
+    assert "unpack2" in result.stderr or "Host" in result.stderr or "Report" in result.stderr
+
+
+@pytest.mark.skipif(_CXX is None, reason="no C++ compiler on PATH")
+def test_the_v2_probe_passes_against_a_format_2_header_set(tmp_path):
+    include = _header_set(tmp_path, capable=True, v2=True)
+
+    v1 = _run_probe(include)
+    v2 = _run_probe(include, v2=True)
+    assert v1.returncode == 0, v1.stderr
+    assert v2.returncode == 0, v2.stderr
+
+
+@pytest.mark.skipif(_CXX is None, reason="no C++ compiler on PATH")
+def test_the_v2_probe_checks_the_debug_accessors_too(tmp_path):
+    """A header set whose iec_retain.hpp has format 2 but whose debug_dispatch.hpp
+    lacks handle_retain_leaf / handle_*_text cannot build the shim's v2 block, so
+    the probe must say no rather than leave the shim to fail."""
+    include = _header_set(tmp_path, capable=True, v2=True, v2_dispatch=False)
+
+    result = _run_probe(include, v2=True)
+    assert result.returncode != 0
+    assert "handle_retain_leaf" in result.stderr or "handle_read_text" in result.stderr
+
+
+@pytest.mark.skipif(_CXX is None, reason="no C++ compiler on PATH")
+def test_the_v2_probe_fails_against_pre_v065_headers(tmp_path):
+    """The v2 pass compiles the v1 half too, so a v2 verdict implies a v1 one."""
+    assert _run_probe(_header_set(tmp_path, capable=False), v2=True).returncode != 0
+
+
 # ---------------------------------------------------------------------------
 # 2. The shim's retain code stays behind the gate
 # ---------------------------------------------------------------------------
 
 
-def _gated_regions(source: str) -> list[tuple[int, int]]:
-    """Line spans covered by `#ifdef STRUCPP_SHIM_HAS_RETAIN` ... `#endif`.
+def _gated_regions(source: str, macro: str = "STRUCPP_SHIM_HAS_RETAIN") -> list[tuple[int, int]]:
+    """Line spans covered by `#ifdef <macro>` ... `#endif`.
 
     Counts nesting so an inner #if inside the block does not close it early.
+    The macro is matched as a whole word, so STRUCPP_SHIM_HAS_RETAIN does not
+    also match the _V2 gate nested inside it.
     """
     spans: list[tuple[int, int]] = []
     start: int | None = None
     depth = 0
+    opener = re.compile(r"#\s*if(def)?\s+.*\b" + re.escape(macro) + r"\b")
     for lineno, line in enumerate(source.splitlines(), start=1):
         stripped = line.strip()
         if start is None:
-            if re.match(r"#\s*if(def)?\s+.*STRUCPP_SHIM_HAS_RETAIN", stripped):
+            if opener.match(stripped):
                 start, depth = lineno, 1
             continue
         if re.match(r"#\s*if", stripped):
@@ -224,7 +381,7 @@ def _gated_regions(source: str) -> list[tuple[int, int]]:
             if depth == 0:
                 spans.append((start, lineno))
                 start = None
-    assert start is None, "unterminated STRUCPP_SHIM_HAS_RETAIN block in the shim"
+    assert start is None, f"unterminated {macro} block in the shim"
     return spans
 
 
@@ -244,6 +401,36 @@ def test_every_retain_reference_in_the_shim_is_gated(name):
             f"#ifdef STRUCPP_SHIM_HAS_RETAIN -- an upload from an editor older "
             f"than v4.2.12 will fail to build"
         )
+
+
+@pytest.mark.parametrize("name", _RETAIN_V2_NAMES)
+def test_every_v2_reference_in_the_shim_is_behind_the_v2_gate(name):
+    """Behind the v1 gate is not enough: a format-1 header set passes that one."""
+    source = _SHIM.read_text(encoding="utf-8")
+    spans = _gated_regions(source, "STRUCPP_SHIM_HAS_RETAIN_V2")
+    assert spans, "the shim has no STRUCPP_SHIM_HAS_RETAIN_V2 block at all"
+
+    seen = False
+    for lineno, line in enumerate(source.splitlines(), start=1):
+        code = line.split("//", 1)[0]
+        if name not in code:
+            continue
+        seen = True
+        assert any(lo <= lineno <= hi for lo, hi in spans), (
+            f"{_SHIM.name}:{lineno} uses {name} outside #ifdef STRUCPP_SHIM_HAS_RETAIN_V2 -- "
+            f"an upload from an editor with format 1 only will fail to build"
+        )
+    assert seen, f"the shim no longer uses {name}; drop it from _RETAIN_V2_NAMES"
+
+
+def test_the_v2_block_sits_inside_the_v1_block():
+    """The v2 exports reuse the v1 block's leaf accessors and layout hash."""
+    source = _SHIM.read_text(encoding="utf-8")
+    outer = _gated_regions(source)
+    inner = _gated_regions(source, "STRUCPP_SHIM_HAS_RETAIN_V2")
+    assert inner
+    for lo, hi in inner:
+        assert any(olo < lo and hi < ohi for olo, ohi in outer), (lo, hi)
 
 
 def test_the_iec_retain_include_is_gated():
@@ -278,6 +465,21 @@ def test_the_probe_exercises_every_name_the_shim_needs(name):
     assert name in code, f"retain_probe.cpp never references {name}"
 
 
+@pytest.mark.parametrize("name", _RETAIN_V2_NAMES)
+def test_the_v2_probe_section_exercises_every_v2_name_the_shim_needs(name):
+    """Same honesty, for the second gate: the names must be in the probe's
+    STRUCPP_RETAIN_PROBE_V2 section, which is the only part the v2 verdict adds."""
+    probe = _PROBE.read_text(encoding="utf-8")
+    sections = re.findall(
+        r"#ifdef STRUCPP_RETAIN_PROBE_V2\n(.*?)#endif", probe, flags=re.DOTALL
+    )
+    code = "\n".join(
+        line.split("//", 1)[0] for section in sections for line in section.splitlines()
+    )
+
+    assert name in code, f"retain_probe.cpp's v2 section never references {name}"
+
+
 def test_the_makefile_only_defines_the_gate_from_the_probe():
     """The wiring: verdict -> define -> the shim's own flag set.
 
@@ -288,10 +490,18 @@ def test_the_makefile_only_defines_the_gate_from_the_probe():
 
     assert "-fsyntax-only $(RETAIN_PROBE)" in makefile
     assert "SHIM_HAS_RETAIN :=" in makefile
-    # The define must be reachable ONLY through the probe's verdict.
+    assert "SHIM_HAS_RETAIN_V2 :=" in makefile
+    # The v2 verdict is the same probe, second pass, and only after v1 passed.
+    assert "-DSTRUCPP_RETAIN_PROBE_V2" in makefile
+    assert "SHIM_HAS_RETAIN_V2 := $(strip $(if $(SHIM_HAS_RETAIN)," in makefile
+    # Each define must be reachable ONLY through its own probe verdict.
     for line in makefile.splitlines():
-        if "-DSTRUCPP_SHIM_HAS_RETAIN" in line:
-            assert "$(if $(SHIM_HAS_RETAIN)" in line, line
+        for define, verdict in (
+            ("-DSTRUCPP_SHIM_HAS_RETAIN_V2", "$(if $(SHIM_HAS_RETAIN_V2),"),
+            ("-DSTRUCPP_SHIM_HAS_RETAIN,", "$(if $(SHIM_HAS_RETAIN),"),
+        ):
+            if define in line:
+                assert verdict in line, line
     # ...and the shim recipe must use the gated flags, not the common ones.
     assert "$(CXX) $(SHIM_CXXFLAGS) -c $< -o $@" in makefile
 
@@ -337,11 +547,11 @@ def _shim_recipe(generated_dir: Path, build_dir: Path) -> str:
     return proc.stdout
 
 
-def _generated_dir(tmp_path: Path, *, capable: bool) -> Path:
+def _generated_dir(tmp_path: Path, *, capable: bool, v2: bool = False) -> Path:
     """A stub `core/generated` with the two prerequisites the shim target needs."""
     generated = tmp_path / "generated"
     generated.mkdir()
-    _header_set(generated, capable=capable)
+    _header_set(generated, capable=capable, v2=v2)
     (generated / "generated.hpp").write_text("#pragma once\n", encoding="utf-8")
     (generated / "defines.h").write_text(
         '#pragma once\n#define PROGRAM_MD5 "x"\n', encoding="utf-8"
@@ -380,7 +590,41 @@ def test_the_legacy_path_says_so_in_the_build_log(tmp_path):
 
 
 @pytest.mark.skipif(_MAKE is None or _CXX is None, reason="needs make and a C++ compiler")
-def test_the_capable_path_stays_quiet(tmp_path):
+def test_make_adds_only_the_v1_define_for_a_format_1_header_set(tmp_path):
+    """Every editor released before format 2: keeps format 1, never fails."""
     recipe = _shim_recipe(_generated_dir(tmp_path, capable=True), tmp_path / "build")
+
+    assert "-DSTRUCPP_SHIM_HAS_RETAIN " in recipe or "-DSTRUCPP_SHIM_HAS_RETAIN\n" in recipe
+    assert "-DSTRUCPP_SHIM_HAS_RETAIN_V2" not in recipe
+
+
+@pytest.mark.skipif(_MAKE is None or _CXX is None, reason="needs make and a C++ compiler")
+def test_make_adds_both_defines_for_a_format_2_header_set(tmp_path):
+    recipe = _shim_recipe(_generated_dir(tmp_path, capable=True, v2=True), tmp_path / "build")
+
+    assert "-DSTRUCPP_SHIM_HAS_RETAIN " in recipe
+    assert "-DSTRUCPP_SHIM_HAS_RETAIN_V2" in recipe
+
+
+@pytest.mark.skipif(_MAKE is None or _CXX is None, reason="needs make and a C++ compiler")
+def test_make_omits_the_v2_define_for_a_legacy_header_set(tmp_path):
+    recipe = _shim_recipe(_generated_dir(tmp_path, capable=False), tmp_path / "build")
+
+    assert "-DSTRUCPP_SHIM_HAS_RETAIN_V2" not in recipe
+
+
+@pytest.mark.skipif(_MAKE is None or _CXX is None, reason="needs make and a C++ compiler")
+def test_the_format_1_path_names_what_it_lacks(tmp_path):
+    """Retain works, but a changed layout resets it -- the user should know why."""
+    recipe = _shim_recipe(_generated_dir(tmp_path, capable=True), tmp_path / "build")
+
+    assert "RETAIN:" in recipe
+    assert "migration by" in recipe
+    assert "v0.6.5" not in recipe, "the pre-retain notice is for legacy header sets only"
+
+
+@pytest.mark.skipif(_MAKE is None or _CXX is None, reason="needs make and a C++ compiler")
+def test_the_capable_path_stays_quiet(tmp_path):
+    recipe = _shim_recipe(_generated_dir(tmp_path, capable=True, v2=True), tmp_path / "build")
 
     assert "RETAIN:" not in recipe

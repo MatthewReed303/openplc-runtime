@@ -158,6 +158,78 @@ Authorization: Bearer <token>
 
 ---
 
+### Cold Start PLC
+
+Start the PLC as a cold restart (IEC 61131-3 Figure 9 rule 4). Every variable,
+RETAIN included, starts at its declared initial value, and the stored retained
+values are overwritten with those initial values before the first scan, so a
+later start or a power cut cannot bring the old ones back. Located forces are
+released. A plain `start-plc` is a warm restart: retained values are restored.
+
+Refused while the PLC is running: stop it first.
+
+**Request:**
+```http
+GET /api/cold-start-plc
+Authorization: Bearer <token>
+```
+
+**Response:**
+```json
+{
+  "status": "COLD_START:OK\n"
+}
+```
+
+**Possible Status Values:** `COLD_START:OK`, `COLD_START:ERROR_ALREADY_RUNNING`,
+`COLD_START:ERROR_SWITCH_STOP`, `COLD_START:ERROR`, or `COMMAND:BUSY` during a
+state change.
+
+---
+
+### Retain Status
+
+What the last start did with retained values.
+
+**Request:**
+```http
+GET /api/retain-status
+Authorization: Bearer <token>
+```
+
+**Response:**
+```json
+{
+  "retain": {
+    "start": "warm",
+    "format": 2,
+    "store": "/var/lib/openplc-runtime/retain.bin",
+    "blob_bytes": 120,
+    "stored_bytes": 132,
+    "result": 7,
+    "result_name": "migrated",
+    "restored": true,
+    "stored_format": 2,
+    "kept": 10,
+    "converted": 1,
+    "truncated": 0,
+    "added": 2,
+    "dropped": 1,
+    "refused": 0,
+    "stored_layout": "1a2b3c4d",
+    "program_layout": "5e6f7a8b"
+  }
+}
+```
+
+`start` is `none` (nothing retained, or no store), `warm` or `cold`. `result`
+is `null` when no restore was attempted (a cold restart, or nothing stored).
+`format` is the program's retain format (1: the stored layout must match; 2:
+migrated by name). For `result_name` `migrated` the counts say what happened
+to the retained values.
+
+---
+
 ### Get PLC Status
 
 Query the current PLC state.

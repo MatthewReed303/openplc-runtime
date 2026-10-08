@@ -30,10 +30,10 @@ extern "C" {
 
 namespace {
 
-/* Matches plc_retain.cpp's RETAIN_BUFFER_MAX. A blob larger than the runtime
+/* The runtime's own ceiling (plc_retain.h). A blob larger than the runtime
  * will marshal cannot reach us, so this is a ceiling on what we will hold, not
  * a limit anyone is expected to meet. */
-constexpr size_t RETAIN_MAX = 64 * 1024;
+constexpr size_t RETAIN_MAX = PLC_RETAIN_BLOB_MAX;
 
 /* Length of the program identity stored ahead of the blob. Mirrors baremetal's
  * OPLC_RETAIN_PROGRAM_ID_LEN: an MD5 as lower-case hex, 32 characters, never
@@ -376,8 +376,22 @@ int plc_retain_file_store_load(const char *program_md5, uint16_t md5_len, uint8_
                  "keeping them; the layout check decides whether they fit");
     }
 
-    const size_t n = fread(out, 1, cap, f);
+    /* `cap` is the caller's buffer, deliberately larger than the running
+     * program's blob: a blob an older program wrote may be bigger and is still
+     * migratable by name, so it is never refused here for its size. Only a
+     * file that does not fit the buffer at all is, and then the caller is told
+     * how much there is rather than handed a silently truncated copy. */
+    const size_t n    = fread(out, 1, cap, f);
+    const bool   more = n == cap && fgetc(f) != EOF;
+    long         size = -1;
+    if (more && fseek(f, 0, SEEK_END) == 0) size = ftell(f);
     fclose(f);
+    if (more)
+    {
+        const long stored = size > (long)PROGRAM_ID_LEN ? size - (long)PROGRAM_ID_LEN : 0;
+        if (out_len) *out_len = stored > 0xFFFF ? (uint16_t)0xFFFF : (uint16_t)stored;
+        return PLC_RETAIN_STORE_TOO_LARGE;
+    }
     if (n == 0) return 0; /* header only: nothing was ever committed for it */
 
     if (out_len) *out_len = (uint16_t)n;

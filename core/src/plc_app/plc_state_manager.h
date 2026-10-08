@@ -188,6 +188,24 @@ bool plc_set_state(PLCState new_state);
 bool plc_claim_transition(PLCState target);
 
 /**
+ * @brief Make the start that was just claimed a COLD restart.
+ *
+ * IEC 61131-3 Figure 9 rule 4 (p.57): a cold restart initializes every RETAIN
+ * and NON_RETAIN variable. Every start here reloads the program, so NON_RETAIN
+ * variables are always initialized (6.5.6.2) and a plain start is a warm
+ * restart (6.5.6.1 rule 1): retained values are restored from the store. A
+ * cold restart skips that restore and overwrites the store with the initial
+ * values (plc_retain_cold_start), and releases every located force.
+ *
+ * PRECONDITION: plc_claim_transition(PLC_STATE_RUNNING) returned true and the
+ * transition has not been performed yet. Arming after the claim is what makes
+ * it belong to exactly that start: no other start can be claimed until this
+ * one lands, and plc_set_state(RUNNING) consumes the mark on every path, so a
+ * start that fails cannot leave a later, ordinary start armed.
+ */
+void plc_arm_cold_start(void);
+
+/**
  * @brief Publish the state a transition landed on: RUNNING, STOPPED, ERROR or EMPTY.
  *
  * Ends the transition. ERROR is sticky against STOPPED: a task that crashed while

@@ -39,6 +39,10 @@
  *     scan    plc_retain_save()    every cycle, WHILE RUNNING ONLY
  *     stop    plc_retain_flush()   once, as the program is unloaded
  *
+ * A COLD restart calls plc_retain_cold_start() where plc_retain_read() would
+ * be: no restore, and the store is overwritten with the initial values through
+ * the same three calls, so a store needs nothing new to support it.
+ *
  * Identical, deliberately, to baremetal's `openplc_retain.h`: same names, same
  * order, same meaning, so a vendor reads one contract and implements the same
  * shape twice.
@@ -83,6 +87,90 @@ extern "C" {
 #define PLC_RETAIN_PROGRAM_ID_LEN 32
 
 /**
+ * @brief The largest blob this runtime reads, packs or hands to a store.
+ *
+ * Every length on the store interface is a uint16_t, so 65535 is the real
+ * ceiling. It was once written as 64 * 1024, which is one more than that: a
+ * program needing exactly 65536 bytes passed the size check and was then
+ * handed to its store with a capacity that truncated to 0.
+ */
+#define PLC_RETAIN_BLOB_MAX 65535u
+
+/**
+ * @brief A store's answer when what it holds is larger than the caller's buffer.
+ *
+ * The read hook's `cap` is the CALLER's buffer, which is PLC_RETAIN_BLOB_MAX
+ * and so usually larger than this program's blob: a blob written by an older
+ * program with more retained variables must still be readable, because a
+ * format-2 blob is migrated by name. A store must never refuse a stored blob
+ * for being larger than the program's own blob size. When it really does not
+ * fit, the store returns this and sets *out_len to the stored length. Same
+ * number as baremetal's OPLC_RETAIN_TOO_LARGE.
+ */
+#define PLC_RETAIN_STORE_TOO_LARGE 4
+
+/**
+ * @brief What a restore did, as STruC++'s `strucpp::retain::LoadResult`.
+ *
+ * The numbers are ABI: the .so returns them as a byte and this runtime logs
+ * and reports them by number, so they are mirrored here rather than shared.
+ * Only OK and MIGRATED wrote any value; every other result left every
+ * retained variable at its declared initial value.
+ */
+enum
+{
+    PLC_RETAIN_RESULT_OK           = 0, /* identical layout (or format 1, same hash) */
+    PLC_RETAIN_RESULT_EMPTY        = 1,
+    PLC_RETAIN_RESULT_BAD_MAGIC    = 2,
+    PLC_RETAIN_RESULT_BAD_FORMAT   = 3,
+    PLC_RETAIN_RESULT_BAD_CRC      = 4,
+    PLC_RETAIN_RESULT_STALE_LAYOUT = 5, /* format 1 from another layout: cannot migrate */
+    PLC_RETAIN_RESULT_TRUNCATED    = 6,
+    PLC_RETAIN_RESULT_MIGRATED     = 7, /* format 2, layout changed, matched by name */
+    PLC_RETAIN_RESULT_BAD_TRAILER  = 8,
+};
+
+/**
+ * @brief Mirror of STruC++'s `strucpp::retain::Report` (24 bytes, POD).
+ *
+ * Filled by `strucpp_retain_unpack2`, which copies min(size, 24) bytes into
+ * whatever the caller passes — so the layout below is a wire contract with the
+ * .so, not a convenience, and the static assertion is what keeps it one.
+ */
+typedef struct
+{
+    uint8_t  result;         /* PLC_RETAIN_RESULT_* */
+    uint8_t  format;         /* stored blob's format, 0 = none / unknown */
+    uint16_t kept;           /* copied with the same type (includes `truncated`) */
+    uint16_t converted;      /* IEC 61131-3 Figure 12 implicit conversion */
+    uint16_t truncated;      /* strings shortened to a smaller declared length */
+    uint16_t added;          /* no stored value: declared initial value */
+    uint16_t dropped;        /* stored values whose variable no longer exists */
+    uint16_t refused;        /* matched by name, type not convertible (or write refused) */
+    uint16_t _pad;
+    uint32_t stored_layout;  /* layout hash in the stored blob's header */
+    uint32_t program_layout; /* layout hash of the program now loaded */
+} plc_retain_report_t;
+
+#ifdef __cplusplus
+static_assert(sizeof(plc_retain_report_t) == 24,
+              "plc_retain_report_t must mirror strucpp::retain::Report byte for byte");
+#else
+_Static_assert(sizeof(plc_retain_report_t) == 24,
+               "plc_retain_report_t must mirror strucpp::retain::Report byte for byte");
+#endif
+
+/**
+ * @brief How the last program start treated retained values.
+ */
+typedef enum
+{
+    PLC_RETAIN_START_NONE = 0, /* retain not in play: no exports, nothing retained, or no store */
+    PLC_RETAIN_START_WARM = 1, /* restore attempted (IEC 61131-3 6.5.6.1 rule 1) */
+    PLC_RETAIN_START_COLD = 2, /* restore skipped, store reset (IEC 61131-3 Figure 9 rule 4) */
+} plc_retain_start_t;
+
+/**
  * @brief Decide once, after the program is loaded, whether retain can run, and
  *        bind whichever driver claimed the store.
  *
@@ -115,6 +203,14 @@ void plc_retain_init(void);
  * a machine starting from its defaults is recoverable, one starting from
  * plausible-looking garbage is not.
  *
+ * A format-2 blob (STruC++ with `strucpp_retain_unpack2`) carries a table of
+ * the variables it holds, so a changed layout is migrated BY NAME instead of
+ * refused: a variable that still exists gets its value back (IEC 61131-3
+ * 6.5.6.1 rule 1), a new one starts at its initial value (6.5.6.2), and the
+ * outcome is logged as counts and kept for plc_retain_status_json(). The read
+ * uses a PLC_RETAIN_BLOB_MAX buffer, not this program's blob size, because the
+ * stored blob may come from an older program with more retained variables.
+ *
  * The values are applied before this returns (not left for the dispatcher's
  * cycle-end drain), so scan 1 sees them.
  *
@@ -145,6 +241,30 @@ void plc_retain_save(void);
  * What it buys is that a CLEAN stop loses nothing on a driver that buffers.
  */
 void plc_retain_flush(void);
+
+/**
+ * @brief The COLD restart counterpart of plc_retain_read().
+ *
+ * IEC 61131-3 Figure 9 rule 4 (p.57): a cold restart initializes every RETAIN
+ * and NON_RETAIN variable. The program was just loaded, so every variable is
+ * already at its declared initial value; what remains is to skip the restore
+ * and to make the STORE agree. So this asks the store for its bytes only to
+ * hand it the program's identity (a store labels its commits with the identity
+ * load() gave it), discards them, packs the initial values and writes and
+ * flushes them at once. A power cut after this returns cannot bring the old
+ * values back on the next warm restart.
+ *
+ * Same calling point and preconditions as plc_retain_read(), in its place.
+ */
+void plc_retain_cold_start(void);
+
+/**
+ * @brief The last start's retain outcome as one line of JSON, for queries.
+ *
+ * Writes at most `cap` bytes including the NUL and returns the length written
+ * (0 when `cap` is too small). The fields are stable; see plc_retain.cpp.
+ */
+size_t plc_retain_status_json(char *out, size_t cap);
 
 #ifdef __cplusplus
 }

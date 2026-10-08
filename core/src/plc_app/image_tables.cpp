@@ -94,6 +94,12 @@ size_t   (*ext_strucpp_retain_pack)       (uint8_t *, size_t)          = nullptr
 uint8_t  (*ext_strucpp_retain_unpack)     (const uint8_t *, size_t,
                                            uint8_t (*)(uint8_t, uint16_t,
                                                        const uint8_t *, uint16_t)) = nullptr;
+size_t   (*ext_strucpp_retain_blob_size2) (void)                       = nullptr;
+size_t   (*ext_strucpp_retain_pack2)      (uint8_t *, size_t)          = nullptr;
+uint8_t  (*ext_strucpp_retain_unpack2)    (const uint8_t *, size_t,
+                                           uint8_t (*)(uint8_t, uint16_t,
+                                                       const uint8_t *, uint16_t),
+                                           void *, size_t)             = nullptr;
 uint8_t  (*ext_strucpp_debug_write)      (uint8_t, uint16_t,
                                           const uint8_t *, uint16_t)     = nullptr;
 int      (*ext_strucpp_debug_locate)     (uint8_t, uint16_t, uint8_t *,
@@ -279,6 +285,11 @@ extern "C" int symbols_init(PluginManager *pm)
     *(void **)&ext_strucpp_retain_layout_hash = resolve(pm, "strucpp_retain_layout_hash", false);
     *(void **)&ext_strucpp_retain_pack        = resolve(pm, "strucpp_retain_pack",        false);
     *(void **)&ext_strucpp_retain_unpack      = resolve(pm, "strucpp_retain_unpack",      false);
+    /* Optional: format 2 (migration by name). plc_retain_init() prefers it
+     * only when all three resolve, so a partial set falls back to format 1. */
+    *(void **)&ext_strucpp_retain_blob_size2  = resolve(pm, "strucpp_retain_blob_size2",  false);
+    *(void **)&ext_strucpp_retain_pack2       = resolve(pm, "strucpp_retain_pack2",       false);
+    *(void **)&ext_strucpp_retain_unpack2     = resolve(pm, "strucpp_retain_unpack2",     false);
     /* Optional: present only on .so's built with strucpp_capabilities bit 2.
      * When NULL the debug-write drain routes every leaf as a global write. */
     *(void **)&ext_strucpp_debug_locate      = resolve(pm, "strucpp_debug_locate",      false);
@@ -731,6 +742,16 @@ void image_tables_clear_null_pointers(void)
     ext_strucpp_debug_read        = nullptr;
     ext_strucpp_debug_write       = nullptr;
     ext_strucpp_debug_locate      = nullptr;
+    /* The retain entry points point into the .so being unloaded. Nothing calls
+     * them once retain is stood down, but a stale pointer into an unmapped page
+     * should not outlive the mapping it came from. */
+    ext_strucpp_retain_blob_size   = nullptr;
+    ext_strucpp_retain_layout_hash = nullptr;
+    ext_strucpp_retain_pack        = nullptr;
+    ext_strucpp_retain_unpack      = nullptr;
+    ext_strucpp_retain_blob_size2  = nullptr;
+    ext_strucpp_retain_pack2       = nullptr;
+    ext_strucpp_retain_unpack2     = nullptr;
     ext_strucpp_get_located_vars      = nullptr;
     ext_strucpp_get_located_var_count = nullptr;
     g_config_ptr = nullptr;
