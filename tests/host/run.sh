@@ -2,19 +2,10 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Autonomy®
 
-#
-# Host tests: plain executables, no framework, no device.
-#
-# For runtime C++ that Ceedling cannot reach (it is configured for C, and these
-# translation units use std::thread / std::mutex) and that does not need the
-# lifecycle harness's real `plc_main`. One command, runs anywhere with a C++17
-# compiler — including macOS, which the lifecycle suite cannot do.
-#
-#   ./tests/host/run.sh
-#
-# Add a test by dropping a `test_*.cpp` (or `test_*.c`, built as C) here that
-# compiles against the sources it needs; list it in TESTS below with those
-# sources. A C test's sources are C too: unix_socket.c is not valid C++.
+# Host tests: plain C++17 executables, no framework, no device. For
+# runtime code Ceedling cannot reach (uses std::thread/mutex) and that
+# needs no plc_main. Add a test by appending it to TESTS below; a
+# test_*.c is built as C together with its (C) sources.
 
 set -euo pipefail
 
@@ -40,6 +31,9 @@ TESTS=(
   "tests/host/test_plc_retain_file_store.cpp:core/src/plc_app/plc_retain_file_store.cpp"
   "tests/host/test_plc_retain.cpp:core/src/plc_app/plc_retain.cpp:core/src/plc_app/plc_retain_file_store.cpp"
   "tests/host/test_unix_socket_retain.c:core/src/plc_app/unix_socket.c"
+  "tests/host/test_rt_mutex.cpp:"
+  "tests/host/test_task_policy.cpp:core/src/plc_app/task_policy.c"
+  "tests/host/test_image_outputs.cpp:core/src/plc_app/image_tables.cpp:core/src/plc_app/located_globals.c"
 )
 
 failures=0
@@ -50,12 +44,26 @@ for entry in "${TESTS[@]}"; do
 
   printf '\n=== %s ===\n' "$name"
   if [ "${test_src##*.}" = "c" ]; then
-    compile="$CC $CFLAGS"
+    # A C test and its sources are built as C: unix_socket.c is not valid C++.
+    # shellcheck disable=SC2086
+    cmd=("$CC" $CFLAGS $INCLUDES "$test_src" ${deps//:/ })
   else
-    compile="$CXX $CXXFLAGS"
+    # C sources are compiled as C, not C++.
+    objs=()
+    for dep in ${deps//:/ }; do
+      if [[ "$dep" == *.c ]]; then
+        obj="$OUT/$(basename "$dep" .c).o"
+        # shellcheck disable=SC2086
+        $CC $CFLAGS $INCLUDES -c "$dep" -o "$obj" || { objs=(); break; }
+        objs+=("$obj")
+      else
+        objs+=("$dep")
+      fi
+    done
+    # shellcheck disable=SC2086
+    cmd=("$CXX" $CXXFLAGS $INCLUDES "$test_src" ${objs[@]+"${objs[@]}"})
   fi
-  # shellcheck disable=SC2086
-  if ! $compile $INCLUDES "$test_src" ${deps//:/ } -o "$OUT/$name" -lpthread; then
+  if ! "${cmd[@]}" -o "$OUT/$name" -lpthread; then
     echo "  FAIL  $name did not compile"
     failures=$((failures + 1))
     continue

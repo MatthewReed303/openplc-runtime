@@ -3,7 +3,7 @@
 
 /**
  * @file plc_retain.cpp
- * @brief Retain-variable persistence — the runtime's half (NODE-94).
+ * @brief Retain-variable persistence — the runtime's half.
  *
  * See plc_retain.h for the split: the .so marshals, a plugin stores, and this
  * file owns the buffer and the call sites.
@@ -35,26 +35,17 @@ extern plugin_driver_t *plugin_driver;
 
 namespace {
 
-/**
- * Cap on the blob this runtime will handle.
- *
- * Generous compared with baremetal's 512 bytes — there is no SRAM pressure
- * here — but bounded on purpose: the buffer is read from the scan path, and an
- * unbounded allocation driven by a program's declaration count is not
- * something to discover on a running machine. A program needing more is
- * refused at init with a message naming both numbers.
- *
- * PLC_RETAIN_BLOB_MAX (65535), not 64 * 1024: every length on the store
- * interface is a uint16_t, and 65536 passed the check above only to reach the
- * store as a capacity of 0.
- */
+/* Cap on the retain blob. Read on the scan path, so an unbounded size
+ * driven by a program's declaration count is refused at init. 65535,
+ * not 64 KiB: store lengths are uint16_t, and 65536 reached the store
+ * as a capacity of 0. */
 constexpr size_t RETAIN_BUFFER_MAX = PLC_RETAIN_BLOB_MAX;
 
 std::vector<uint8_t> g_buffer;
 std::atomic<bool>    g_active{false};
 
-/* Whether this program offers the format-2 API (strucpp_retain_*2). Written
- * only by plc_retain_init() before `g_active` publishes, like `g_driver`. */
+/* True when the program exports the format-2 API (strucpp_retain_*2).
+ * Written only by plc_retain_init() before g_active publishes. */
 bool g_v2 = false;
 
 size_t retain_blob_size()
@@ -72,13 +63,9 @@ uint32_t program_layout_hash()
     return ext_strucpp_retain_layout_hash ? ext_strucpp_retain_layout_hash() : 0u;
 }
 
-/**
- * The last start's outcome, kept for plc_retain_status_json().
- *
- * Written by the PLC thread while a start lands and read by the command-socket
- * thread whenever someone asks, so it has its own lock. Neither side holds it
- * for longer than a copy.
- */
+/* Last start's outcome for plc_retain_status_json(). Written by the PLC
+ * thread, read by the command-socket thread; g_status_lock guards it and
+ * is held only for a copy. */
 struct RetainStatus
 {
     plc_retain_start_t  start        = PLC_RETAIN_START_NONE;
@@ -93,15 +80,9 @@ struct RetainStatus
 std::mutex   g_status_lock;
 RetainStatus g_status;
 
-/**
- * Why a restore wrote nothing, indexed by `strucpp::retain::LoadResult`.
- *
- * Deliberately explicit about WHICH check failed. "Retain refused" sends
- * someone hunting; "the stored layout is from a different program" tells them
- * it was the upload, and a crc failure tells them it was the store. MIGRATED
- * (7) is never a refusal and is here only so every later index stays equal to
- * its LoadResult number.
- */
+/* Why a restore wrote nothing, indexed by strucpp::retain::LoadResult and
+ * explicit about which check failed. MIGRATED (7) is not a refusal; it is
+ * listed so later indices keep their LoadResult numbers. */
 const char *const k_why[] = {
     "ok",
     "no data",
@@ -129,7 +110,7 @@ const char *why_text(uint8_t res)
     return res < k_result_count ? k_why[res] : "unknown";
 }
 
-/** Say what a restore did, in one line. */
+/* Logs what a restore did, in one line. */
 void log_report(const plc_retain_report_t *r, uint16_t stored_bytes)
 {
     if (r->result == PLC_RETAIN_RESULT_OK)
@@ -140,11 +121,8 @@ void log_report(const plc_retain_report_t *r, uint16_t stored_bytes)
     }
     if (r->result == PLC_RETAIN_RESULT_MIGRATED)
     {
-        /* A changed layout migrated by name. IEC 61131-3 6.5.6.1 rule 1 gives
-         * every variable that still exists its stored value; 6.5.6.2 gives a new
-         * one, and one whose stored value could not be converted, its declared
-         * initial value. A refusal is the only part that loses something the
-         * operator may have set, so it is the part that raises the level. */
+        /* Layout changed and migrated by name (IEC 61131-3 6.5.6.1/6.5.6.2).
+         * Only a refusal loses a stored value, so only it logs a warning. */
         char line[192];
         snprintf(line, sizeof(line),
                  "Retain: layout changed %08" PRIx32 " -> %08" PRIx32
@@ -162,29 +140,15 @@ void log_report(const plc_retain_report_t *r, uint16_t stored_bytes)
              why_text(r->result));
 }
 
-/**
- * Restore writes go through the runtime's external-write path, NOT straight to
- * the IECVar.
- *
- * A retained variable may also be located (`VAR RETAIN x AT %MW10`). Poking
- * such a leaf's storage directly is undone by the next copy-in from the process
- * image, so the value would appear to restore and then silently revert on the
- * first scan. `runtime_external_write` classifies the leaf and routes a located
- * one through the image journal — the same path OPC-UA writes take.
- *
- * DBGW_OP_WRITE, never a force: restoring a retained value must not pin it. The
- * program has to be able to move it on the very next scan, and an operator's
- * force has to stay authoritative over whatever was stored.
- */
+/* Restore via runtime_external_write (not direct IECVar poke): routes a
+ * located leaf through the image journal so copy_in won't revert it.
+ * DBGW_OP_WRITE, never a force — a restore must not pin the slot. */
 uint8_t retain_write_leaf(uint8_t arr, uint16_t elem, const uint8_t *bytes, uint16_t len)
 {
     const int rc = runtime_external_write(arr, elem, (uint8_t)DBGW_OP_WRITE, bytes, len);
 
-    /* Restoring happens once, at program load, before any task is released —
-     * so apply the write now instead of leaving it for the dispatcher's
-     * cycle-end drain. Left queued, scan 1 would run on the initial values and
-     * the restore would then overwrite what scan 1 wrote; and a program with
-     * more retained leaves than the queue holds would lose the rest. */
+    /* Restore runs before any task is released: drain now, or scan 1 runs
+     * on initial values and leaves beyond the queue's capacity are lost. */
     image_lock();
     debug_write_journal_drain();
     image_unlock();
@@ -192,15 +156,8 @@ uint8_t retain_write_leaf(uint8_t arr, uint16_t elem, const uint8_t *bytes, uint
     return rc == 0 ? 0x7E : 0x82;
 }
 
-/**
- * A store, whatever kind it is.
- *
- * Three function pointers and a name. Everything past init() calls through this
- * record, so there is exactly one path to storage and no branch anywhere that
- * asks whether the bytes are going to a plugin or to a file. Adding a third
- * kind of store means filling this in from somewhere new and changing nothing
- * else.
- */
+/* Uniform store record (name + 3 fn pointers). Past init() every path
+ * calls through this, so plugin and file store share one code path. */
 struct RetainDriver
 {
     const char *name;
@@ -211,13 +168,8 @@ struct RetainDriver
 };
 
 /* Written only by plc_retain_init(), read from the scan thread.
- *
- * `g_active` IS THE PUBLICATION BARRIER for this record. init() stores false
- * before mutating it and true after, both seq_cst, and every reader checks
- * g_active before touching g_driver — so a reader that sees active==true is
- * guaranteed to see the completed record. Nothing else orders these writes, so
- * an early return that skips the `store(true)`, or a relaxed memory order on
- * either store, would break it silently. */
+ * g_active is the publication barrier: init() stores false (seq_cst)
+ * before mutating g_driver and true after; readers gate on g_active. */
 RetainDriver g_driver = {nullptr, nullptr, nullptr, nullptr};
 
 /* The plugin acting as the store, when a plugin claimed it. Held only so the
@@ -258,21 +210,10 @@ void record_start(plc_retain_start_t start, uint16_t stored_bytes,
     g_status.report       = report ? *report : plc_retain_report_t{};
 }
 
-/**
- * The program's identity, or NULL after standing retain down.
- *
- * No identity to compare against means a driver cannot tell a new program from
- * the old one, and restoring on that basis is how one program inherits
- * another's state. Refuse — and stand the store DOWN rather than leave saves
- * running.
- *
- * Returning while `g_active` stayed true left retain half-on: the per-scan
- * save kept packing and handing over bytes that no driver could ever commit,
- * because the identity a commit needs is only ever set by the read this branch
- * skipped. The file store then refused every write and logged "short write"
- * once per flush interval, forever, naming a cause that was not the real one.
- * One warning, said once, is the whole story — so make it true.
- */
+/* Program identity, or NULL after standing retain down. No identity
+ * means a driver cannot tell programs apart; stand the store down
+ * (g_active=false) rather than leave saves running against bytes no
+ * driver can ever commit. */
 const char *program_identity_or_stand_down()
 {
     if (ext_strucpp_program_md5) return ext_strucpp_program_md5;
@@ -286,15 +227,9 @@ const char *program_identity_or_stand_down()
     return nullptr;
 }
 
-/**
- * A buffer as large as any blob a store may hold, for the one read per start.
- *
- * NOT this program's blob size. The stored blob may have been written by an
- * older program with more retained variables, and a format-2 blob from it is
- * still migratable by name — so a read capped at THIS program's size would
- * truncate exactly the blob migration exists for. Allocated per start and freed
- * straight after: the scan path never sees it.
- */
+/* Read buffer sized for any stored blob, NOT this program's blob: an
+ * older program's larger format-2 blob still migrates by name. Allocated
+ * per start and freed after; the scan path never sees it. */
 std::unique_ptr<uint8_t[]> make_read_buffer()
 {
     std::unique_ptr<uint8_t[]> buf(new (std::nothrow) uint8_t[RETAIN_BUFFER_MAX]);
@@ -307,14 +242,9 @@ std::unique_ptr<uint8_t[]> make_read_buffer()
     return buf;
 }
 
-/**
- * Ask the store for what it holds for this program.
- *
- * Returns the bytes handed back (0 when there is nothing to restore, whatever
- * the reason; the reason is logged here). The call also hands the store the
- * program's identity, which it keeps for labelling its next commit — so a cold
- * restart makes it too, and throws the bytes away.
- */
+/* Reads what the store holds for this program; returns its length, 0 when
+ * there is nothing to restore (reason logged here). Also hands the store
+ * the identity it labels its next commit with. */
 uint16_t read_from_store(const char *md5, uint8_t *buf, bool quiet)
 {
     uint16_t  got = 0;
@@ -378,10 +308,8 @@ void plc_retain_init(void)
         std::lock_guard<std::mutex> guard(g_status_lock);
         g_status = RetainStatus{};
     }
-    /* Re-read retain.conf on every program load, so settings that arrived with
-     * a program upload take effect on the next PLC start without needing the
-     * daemon restarted. Stopping first is what forces the re-read, and it also
-     * commits anything the previous run was still holding. */
+    /* Re-read retain.conf per program load; stopping first forces the
+     * re-read and commits anything the previous run was still holding. */
     plc_retain_file_store_stop();
 
     /* Format 2 when the program offers all three of its entry points: a blob
@@ -407,15 +335,8 @@ void plc_retain_init(void)
         return;
     }
 
-    /* Ask the drivers, in rank order, which will hold the bytes.
-     *
-     * A vendor plugin outranks the built-in file store because the vendor knows
-     * what the box actually has — FRAM, battery-backed SRAM, an NVS partition —
-     * and a file on the data partition is the runtime's default, not its
-     * preference. In a correctly declared device only one of them offers itself
-     * at all: the file store answers no unless retain.conf enabled it, and the
-     * editor emits no retain.conf for a target whose VPP declared that it owns
-     * retention. So this is a rank, not an arbitration. */
+    /* Pick a store in rank order: a VPP that owns retention wins over the
+     * built-in file store. In a correct device only one offers itself. */
     g_plugin_store = plugin_driver_find_retain_store(plugin_driver);
     if (g_plugin_store)
     {
@@ -457,11 +378,9 @@ void plc_retain_read(void)
 {
     if (!g_active.load() || !driver_bound()) return;
 
-    /* The program's identity, so the driver can tell whether the bytes it holds
-     * belong to the program now running. Resolved from the .so at load time
-     * (image_tables.cpp), so it is already available here. Exactly 32
-     * characters of hex and NOT guaranteed NUL-terminated, which is why the
-     * length travels with it rather than being recovered with strlen. */
+    /* Program identity (32 hex, NOT NUL-terminated: length travels),
+     * resolved from the .so at load; drivers compare it to tell a new
+     * program from the old one. */
     const char *md5 = program_identity_or_stand_down();
     if (!md5) return;
 
@@ -481,8 +400,8 @@ void plc_retain_read(void)
     }
     else
     {
-        /* Format 1 reports only its result. Fill in what is known so the status
-         * query reads the same either way. */
+        /* Format 1 reports only its result; fill the rest so the status
+         * query reads the same for both formats. */
         report.result         = ext_strucpp_retain_unpack(buf.get(), got, retain_write_leaf);
         report.format         = report.result == PLC_RETAIN_RESULT_OK ? 1 : 0;
         report.program_layout = program_layout_hash();
@@ -503,23 +422,17 @@ void plc_retain_cold_start(void)
     const char *md5 = program_identity_or_stand_down();
     if (!md5) return;
 
-    /* The store is still asked for its bytes, and they are thrown away: the
-     * call is how a store learns the identity it labels its next commit with
-     * (plugin_driver.h), and a store that never got it would refuse the
-     * write below. */
+    /* Read and discard: the read hands the store the identity it labels
+     * its next commit with; without it the write below is refused. */
     std::unique_ptr<uint8_t[]> buf = make_read_buffer();
     if (buf) (void)read_from_store(md5, buf.get(), true);
     buf.reset();
 
     record_start(PLC_RETAIN_START_COLD, 0, nullptr);
 
-    /* IEC 61131-3 Figure 9 rule 4: a cold restart initializes every RETAIN and
-     * NON_RETAIN variable. The program was loaded a moment ago, so every
-     * variable already holds its declared initial value; skipping the restore
-     * is what keeps it that way. But the STORE still holds the old values, and
-     * the next warm restart (or a power cut) would bring them back. So hand the
-     * initial values to the store now and ask it to commit at once, rather than
-     * leaving it to the first scan's save and the store's own schedule. */
+    /* IEC 61131-3 Figure 9 rule 4: variables already hold their initial
+     * values (no restore). Commit those to the store now, or a later warm
+     * restart or power cut would bring the old values back. */
     const size_t n = retain_pack(g_buffer.data(), g_buffer.size());
     if (n == 0)
     {

@@ -61,9 +61,8 @@ _RETAIN_NAMES = (
     "strucpp::debug::retain_layout_hash",
 )
 
-# Every name the shim's format-2 block uses that only a format-2 header set can
-# satisfy. These must sit inside `#ifdef STRUCPP_SHIM_HAS_RETAIN_V2`, and the
-# probe's v2 section must touch every one.
+# Names only a format-2 header set satisfies: they must sit inside
+# `#ifdef STRUCPP_SHIM_HAS_RETAIN_V2`, and the probe's v2 section must use each.
 _RETAIN_V2_NAMES = (
     "strucpp::retain::Host",
     "strucpp::retain::Report",
@@ -75,11 +74,8 @@ _RETAIN_V2_NAMES = (
     "strucpp::debug::handle_write_text",
 )
 
-# --- header stubs ----------------------------------------------------------
-#
-# Deliberately minimal. The probe includes exactly two headers, so these are all
-# it can see, and hand-written stubs let the test state the SHAPE that matters
-# without vendoring a copy of STruC++ into the runtime repo.
+# Hand-written header stubs. The probe includes exactly two headers, so
+# these are all it can see.
 
 _DEBUG_TABLE_COMMON = """
 #pragma once
@@ -506,16 +502,9 @@ def test_the_makefile_only_defines_the_gate_from_the_probe():
     assert "$(CXX) $(SHIM_CXXFLAGS) -c $< -o $@" in makefile
 
 
-# ---------------------------------------------------------------------------
-# 4. The wiring: probe verdict -> compiler flag
-# ---------------------------------------------------------------------------
-#
-# Everything above can pass while the build still does the wrong thing. It did:
-# the first cut of the Makefile wrote the verdict with a line continuation, and
-# GNU make counts the lone space that leaves behind as a NON-EMPTY $(if)
-# condition -- so a legacy header set produced " " instead of "", the gate turned
-# on for exactly the uploads it exists to protect, and the original error came
-# straight back. Only asking make itself catches that class of bug.
+# Asks `make` itself whether the probe verdict actually becomes the
+# right compiler flag: $(if) treats a line-continuation space as truthy,
+# which GNU make's own invocation is the only reliable detector of.
 
 _MAKE = shutil.which("make") or shutil.which("gmake")
 
