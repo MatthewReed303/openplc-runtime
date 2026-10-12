@@ -14,6 +14,9 @@
 #include <csetjmp>
 #include <csignal>
 #include <cstdio>
+#include <mutex>
+#include <stdexcept>
+#include <string>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -129,6 +132,77 @@ static volatile sig_atomic_t plc_crash_signal        = 0;
 
 /* Set when a task had to be aborted; the stop then lands ERROR, not STOPPED. */
 static std::atomic<bool> g_task_fault{false};
+
+/* ---- The fault record (plc_state_manager.h, plc_fault_*) ---------------- */
+static std::mutex g_fault_lock;
+static struct
+{
+    uint8_t  code;
+    int      task;
+    char     task_name[64];
+    uint32_t detail;
+    bool     safe_mode;
+    uint8_t  count;
+} g_fault = {PLC_FAULT_NONE, -1, "", 0, false, 0};
+
+void plc_fault_record(uint8_t code, int task, const char *task_name, uint32_t detail, bool safe_mode)
+{
+    std::lock_guard<std::mutex> guard(g_fault_lock);
+    if (g_fault.code == PLC_FAULT_NONE)
+    {
+        g_fault.code      = code;
+        g_fault.task      = task;
+        g_fault.detail    = detail;
+        g_fault.safe_mode = safe_mode;
+        std::snprintf(g_fault.task_name, sizeof g_fault.task_name, "%s", task_name ? task_name : "");
+    }
+    if (g_fault.count < 255) ++g_fault.count;
+}
+
+void plc_fault_clear(void)
+{
+    std::lock_guard<std::mutex> guard(g_fault_lock);
+    g_fault.code         = PLC_FAULT_NONE;
+    g_fault.task         = -1;
+    g_fault.task_name[0] = '\0';
+    g_fault.detail       = 0;
+    g_fault.safe_mode    = false;
+    g_fault.count        = 0;
+}
+
+static const char *fault_kind(uint8_t code)
+{
+    switch (code)
+    {
+    case PLC_FAULT_NONE:               return "none";
+    case PLC_FAULT_TASK_STUCK:         return "task-stuck";
+    case PLC_FAULT_DISPATCHER_STALLED: return "dispatcher-stalled";
+    case PLC_FAULT_FIRST_SCAN_STUCK:   return "first-scan-stuck";
+    case PLC_FAULT_STOP_TIMEOUT:       return "stop-timeout";
+    case PLC_FAULT_TASK_ENDED:         return "task-ended";
+    case PLC_FAULT_WATCHDOG_EXIT:      return "watchdog-exit";
+    default:                           return "unknown";
+    }
+}
+
+size_t plc_fault_json(char *out, size_t cap)
+{
+    if (!out || cap == 0) return 0;
+    std::lock_guard<std::mutex> guard(g_fault_lock);
+    std::string name;
+    for (const char *c = g_fault.task_name; *c; ++c)
+    {
+        if (*c == '"' || *c == '\\') name += '\\';
+        if ((unsigned char)*c >= 0x20) name += *c;
+    }
+    const int n = std::snprintf(out, cap,
+                                "{\"code\":%u,\"kind\":\"%s\",\"task\":%d,\"taskName\":\"%s\","
+                                "\"safeMode\":%s,\"count\":%u,\"detail\":%u}",
+                                (unsigned)g_fault.code, fault_kind(g_fault.code), g_fault.task, name.c_str(),
+                                g_fault.safe_mode ? "true" : "false", (unsigned)g_fault.count,
+                                (unsigned)g_fault.detail);
+    return (n > 0 && (size_t)n < cap) ? (size_t)n : 0;
+}
 
 /* Longest task interval of the loaded program, for the stop budget. */
 static std::atomic<int64_t> g_longest_interval_ns{0};
@@ -249,8 +323,12 @@ static void plc_task_body(PlcTaskCtx *ctx)
         if (ctx->crash_sig == PLC_TASK_ABORT_SIGNAL)
             log_error("[task %s] scan aborted by the watchdog", ctx->name);
         else
+        {
             log_error("[task %s] terminated by signal %d — other tasks keep running",
                       ctx->name, ctx->crash_sig);
+            plc_fault_record(PLC_FAULT_TASK_ENDED, (int)(ctx - plc_tasks), ctx->name,
+                             ctx->crash_sig == SIGFPE ? PLC_TASK_ENDED_ARITHMETIC : PLC_TASK_ENDED_MEMORY, false);
+        }
         return;
     }
 
@@ -319,6 +397,13 @@ static void plc_task_body(PlcTaskCtx *ctx)
             worker_scan_done();   /* release the in-flight slot before exiting */
             log_error("[task %s] terminated by unhandled exception: %s — "
                       "other tasks keep running", ctx->name, e.what());
+            /* strucpp throws out_of_range for an array index, NullReferenceException
+             * (a runtime_error) for a NULL dereference. */
+            const uint32_t why = dynamic_cast<const std::out_of_range *>(&e) ? PLC_TASK_ENDED_ARRAY_BOUNDS
+                                 : std::strncmp(e.what(), "Null reference dereference", 26) == 0
+                                     ? PLC_TASK_ENDED_NULL_REFERENCE
+                                                                            : PLC_TASK_ENDED_OTHER;
+            plc_fault_record(PLC_FAULT_TASK_ENDED, (int)(ctx - plc_tasks), ctx->name, why, false);
             return;
         }
         catch (...)
@@ -329,6 +414,7 @@ static void plc_task_body(PlcTaskCtx *ctx)
             worker_scan_done();   /* release the in-flight slot before exiting */
             log_error("[task %s] terminated by unknown exception — "
                       "other tasks keep running", ctx->name);
+            plc_fault_record(PLC_FAULT_TASK_ENDED, (int)(ctx - plc_tasks), ctx->name, PLC_TASK_ENDED_OTHER, false);
             return;
         }
 
@@ -407,6 +493,8 @@ static void abort_task(PlcTaskCtx *c)
         log_error("[task %s] did not exit within %d ms of being woken", c->name,
                   PLC_TASK_ABORT_TIMEOUT_MS);
     g_task_fault.store(true, std::memory_order_release);
+    plc_fault_record(PLC_FAULT_STOP_TIMEOUT, (int)(c - plc_tasks), c->name,
+                     (uint32_t)(task_scan_limit_ns(c) / NS_PER_MS), false);
 
     const timespec poll        = {0, PLC_TASK_EXIT_POLL_NS};
     const int64_t  give_up     = monotonic_ns() + PLC_TASK_ABORT_TIMEOUT_MS * NS_PER_MS;
@@ -491,6 +579,23 @@ static void plc_outputs_off(void)
     log_info("Outputs forced to 0");
 }
 
+/* Outputs on STOP and in ERROR, the program's setting (Outputs on STOP / error
+ * in the editor, as CODESYS's "Behaviour of outputs in Stop"): held at the
+ * values the last scans gave them, or switched off. Held, they get no further
+ * frame and take no queued write. Retained values are kept either way. */
+static void plc_outputs_on_stop(void)
+{
+    if (ext_strucpp_outputs_on_stop && ext_strucpp_outputs_on_stop() == PLC_OUTPUTS_HOLD)
+    {
+        image_lock();
+        journal_cleanup();
+        image_unlock();
+        log_info("Outputs held at their last values");
+        return;
+    }
+    plc_outputs_off();
+}
+
 void *plc_cycle_thread(void *arg)
 {
     PluginManager *pm = (PluginManager *)arg;
@@ -499,6 +604,7 @@ void *plc_cycle_thread(void *arg)
     bootstrap_crash_sig     = 0;
     bootstrap_holding_mutex = 0;
     g_task_fault.store(false, std::memory_order_release);
+    plc_fault_clear();
     g_first_scan_since_ns.store(0, std::memory_order_release);
     g_first_scan_trip.store(false, std::memory_order_release);
     watchdog_dispatcher_stopped();
@@ -572,6 +678,8 @@ void *plc_cycle_thread(void *arg)
     {
         plc_retain_read();
     }
+    /* A store that saves on its own period gets the values off the scan path. */
+    plc_retain_run_start();
 
     if (plugin_driver)
     {
@@ -634,7 +742,7 @@ void *plc_cycle_thread(void *arg)
         if (plc_tasks && plc_task_count)
         {
             reap_task_threads();
-            plc_outputs_off();
+            plc_outputs_on_stop();
         }
         return NULL;
     }
@@ -1020,6 +1128,11 @@ void *plc_cycle_thread(void *arg)
                               c->name, PLC_TASK_STUCK_PERIODS,
                               (long long)(task_stuck_limit_ns(c) / NS_PER_MS));
                 g_task_fault.store(true, std::memory_order_release);
+                plc_fault_record(first_scan_trip ? PLC_FAULT_FIRST_SCAN_STUCK : PLC_FAULT_TASK_STUCK, (int)stuck_idx,
+                                 c->name,
+                                 (uint32_t)((first_scan_trip ? (int64_t)PLC_FIRST_SCAN_TIMEOUT_MS * NS_PER_MS
+                                                             : task_stuck_limit_ns(c)) / NS_PER_MS),
+                                 false);
                 /* Claim now so no command lands mid-drain; the teardown runs after the reap. */
                 fault_stop_claimed = plc_claim_transition(PLC_STATE_STOPPED);
                 break;
@@ -1080,7 +1193,7 @@ void *plc_cycle_thread(void *arg)
     watchdog_dispatcher_stopped();
     g_first_scan_since_ns.store(0, std::memory_order_release);
     reap_task_threads();
-    plc_outputs_off();
+    plc_outputs_on_stop();
 
     signal(SIGFPE,  SIG_DFL);
     signal(SIGSEGV, SIG_DFL);

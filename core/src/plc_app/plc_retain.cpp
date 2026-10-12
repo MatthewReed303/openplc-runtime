@@ -12,6 +12,10 @@
 #include "plc_retain.h"
 
 #include <atomic>
+#include <pthread.h>
+#include <chrono>
+#include <condition_variable>
+#include <thread>
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
@@ -47,6 +51,8 @@ std::atomic<bool>    g_active{false};
 /* True when the program exports the format-2 API (strucpp_retain_*2).
  * Written only by plc_retain_init() before g_active publishes. */
 bool g_v2 = false;
+
+
 
 size_t retain_blob_size()
 {
@@ -171,6 +177,42 @@ struct RetainDriver
  * g_active is the publication barrier: init() stores false (seq_cst)
  * before mutating g_driver and true after; readers gate on g_active. */
 RetainDriver g_driver = {nullptr, nullptr, nullptr, nullptr};
+
+/* The store saves on its own period, so the values are packed off the scan
+ * by g_live about once a second (plc_retain_run_start). Set by init. */
+bool g_periodic = false;
+constexpr int LIVE_PERIOD_MS = 1000;
+std::thread             g_live;
+std::mutex              g_live_lock;
+std::condition_variable g_live_wake;
+bool                    g_live_stop = false;
+std::vector<uint8_t>    g_live_buffer;
+
+void live_loop()
+{
+    pthread_setname_np(pthread_self(), "plc_retain");
+    std::unique_lock<std::mutex> lock(g_live_lock);
+    while (!g_live_stop)
+    {
+        g_live_wake.wait_for(lock, std::chrono::milliseconds(LIVE_PERIOD_MS), [] { return g_live_stop; });
+        if (g_live_stop) break;
+        lock.unlock();
+        const size_t n = ext_strucpp_retain_pack2_live(g_live_buffer.data(), g_live_buffer.size());
+        if (n != 0) g_driver.write(g_live_buffer.data(), (uint16_t)n);
+        lock.lock();
+    }
+}
+
+void live_stop()
+{
+    if (!g_live.joinable()) return;
+    {
+        std::lock_guard<std::mutex> guard(g_live_lock);
+        g_live_stop = true;
+    }
+    g_live_wake.notify_all();
+    g_live.join();
+}
 
 /* The plugin acting as the store, when a plugin claimed it. Held only so the
  * thunks below have something to forward to — the plugin hooks are instance
@@ -299,7 +341,9 @@ void json_escape(std::string &out, const char *s)
 
 void plc_retain_init(void)
 {
+    live_stop();
     g_active.store(false);
+    g_periodic = false;
     g_plugin_store = nullptr;
     g_driver       = {nullptr, nullptr, nullptr, nullptr};
     g_buffer.clear();
@@ -362,6 +406,11 @@ void plc_retain_init(void)
     }
 
     g_buffer.assign(needed, 0);
+    /* Periodic when the store commits on its own period and the program can be
+     * packed while it runs; otherwise every frame, as before. */
+    g_periodic = g_v2 && ext_strucpp_retain_pack2_live != nullptr &&
+                 (g_plugin_store ? plugin_driver_retain_mode(g_plugin_store) == PLC_RETAIN_MODE_PERIODIC : true);
+    if (g_periodic) g_live_buffer.assign(needed, 0);
     {
         std::lock_guard<std::mutex> guard(g_status_lock);
         g_status.api        = g_v2 ? 2 : 1;
@@ -456,7 +505,7 @@ void plc_retain_cold_start(void)
 
 void plc_retain_save(void)
 {
-    if (!g_active.load() || !driver_bound()) return;
+    if (!g_active.load() || !driver_bound() || g_periodic) return;
 
     const size_t n = retain_pack(g_buffer.data(), g_buffer.size());
     if (n == 0) return;
@@ -469,8 +518,23 @@ void plc_retain_save(void)
 
 void plc_retain_flush(void)
 {
-    if (!g_active.load() || !g_driver.flush) return;
-    g_driver.flush();
+    /* Every task has stopped: the live thread ends, and a periodic store gets
+     * the values the program stopped with, packed in one consistent pass. */
+    live_stop();
+    if (!g_active.load()) return;
+    if (g_periodic && driver_bound())
+    {
+        const size_t n = retain_pack(g_buffer.data(), g_buffer.size());
+        if (n != 0) g_driver.write(g_buffer.data(), (uint16_t)n);
+    }
+    if (g_driver.flush) g_driver.flush();
+}
+
+void plc_retain_run_start(void)
+{
+    if (!g_active.load() || !g_periodic || g_live.joinable()) return;
+    g_live_stop = false;
+    g_live      = std::thread(live_loop);
 }
 
 size_t plc_retain_status_json(char *out, size_t cap)
@@ -489,6 +553,8 @@ size_t plc_retain_status_json(char *out, size_t cap)
     json += "\",\"format\":" + std::to_string(st.api);
     json += ",\"store\":\"";
     json_escape(json, st.store.c_str());
+    json += "\",\"mode\":\"";
+    json += g_periodic ? "periodic" : "every-scan";
     json += "\",\"blob_bytes\":" + std::to_string(st.blob_bytes);
     json += ",\"stored_bytes\":" + std::to_string(st.stored_bytes);
     if (st.have_report)

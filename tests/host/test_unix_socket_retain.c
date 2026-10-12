@@ -99,6 +99,15 @@ bool         plc_switch_allows_run(void) { return g_switch_run; }
 bool         plc_switch_take_movement(void) { return false; }
 void         plc_switch_note_movement(void) {}
 
+size_t plc_fault_json(char *out, size_t cap)
+{
+    const char *json = "{\"code\":16,\"kind\":\"task-stuck\",\"task\":1,\"taskName\":\"NET\","
+                       "\"safeMode\":false,\"count\":1,\"detail\":1000}";
+    if (strlen(json) + 1 > cap) return 0;
+    strcpy(out, json);
+    return strlen(json);
+}
+
 size_t plc_retain_status_json(char *out, size_t cap)
 {
     const char *json = "{\"start\":\"cold\",\"result\":null}";
@@ -204,6 +213,12 @@ int main(void)
     reset();
     g_transitioning = true;
     CHECK(strncmp(send_cmd("RETAIN"), "RETAIN:{", 8) == 0, g_resp);
+
+    g_case = "FAULT answers FAULT:<json>, also mid-transition";
+    static const char k_fault[] = "FAULT:{\"code\":16,\"kind\":\"task-stuck\"";
+    CHECK(strncmp(send_cmd("FAULT"), k_fault, sizeof(k_fault) - 1) == 0, g_resp);
+    reset();
+    CHECK(strncmp(send_cmd("FAULT"), k_fault, sizeof(k_fault) - 1) == 0, g_resp);
 
     if (g_failures == 0)
     {

@@ -406,6 +406,23 @@ class RuntimeManager:
             logger.error("Failed to cold-start PLC runtime (unexpected): %s", e)
             return "COLD_START:ERROR\n"
 
+    def fault_status(self) -> Optional[str]:
+        """
+        Send FAULT: the first fault since the last start (a stuck task, a task a
+        runtime error ended, a safe-mode restart's reason).
+
+        Answers ``FAULT:<json>`` (see plc_fault_json in the runtime), or None
+        when the runtime cannot be reached.
+        """
+        try:
+            return self.runtime_socket.send_and_receive("FAULT\n")
+        except (OSError, socket.error) as e:
+            logger.error("Failed to get fault status: %s", e)
+            return None
+        except Exception as e:
+            logger.error("Failed to get fault status (unexpected): %s", e)
+            return None
+
     def retain_status(self) -> Optional[str]:
         """
         Send RETAIN: what the last start did with retained values.

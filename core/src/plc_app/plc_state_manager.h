@@ -11,6 +11,7 @@
 #include <setjmp.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* Dual-language atomic types: C uses <stdatomic.h>'s _Atomic-typedef
@@ -226,6 +227,31 @@ void plc_state_manager_cleanup(void);
  * state without triggering program load/unload side effects (unlike plc_set_state).
  */
 void plc_force_error_state(void);
+
+/* The first fault since the last start, as FAULT:<json> and /api/status report
+ * it. Codes and names are the same as the bare-metal runtime's (editor
+ * resources/sources/arduino/arduino_runtime_glue.h, RUNTIME_FAULT_*). */
+#define PLC_FAULT_NONE               0x00
+#define PLC_FAULT_TASK_STUCK         0x10 /* a task in one scan for 10 periods: PLC stopped, ERROR */
+#define PLC_FAULT_DISPATCHER_STALLED 0x11 /* the dispatcher stopped ticking: safe-mode restart */
+#define PLC_FAULT_FIRST_SCAN_STUCK   0x12 /* a first scan past its timeout: PLC stopped, ERROR */
+#define PLC_FAULT_STOP_TIMEOUT       0x13 /* a task did not finish its scan on a stop */
+#define PLC_FAULT_TASK_ENDED         0x14 /* a runtime error ended a task; the others keep running */
+#define PLC_FAULT_WATCHDOG_EXIT      0x15 /* any other watchdog exit: safe-mode restart */
+/* PLC_FAULT_TASK_ENDED details. */
+#define PLC_TASK_ENDED_NULL_REFERENCE 0
+#define PLC_TASK_ENDED_ARRAY_BOUNDS   1
+#define PLC_TASK_ENDED_MEMORY         3 /* SIGSEGV */
+#define PLC_TASK_ENDED_ARITHMETIC     4 /* SIGFPE */
+#define PLC_TASK_ENDED_OTHER          0xFE
+
+/* Keep the first fault since the last start, and count every one. `task` is the
+ * task's index, or -1; `task_name` may be NULL. */
+void plc_fault_record(uint8_t code, int task, const char *task_name, uint32_t detail, bool safe_mode);
+/* Cleared when the PLC starts. */
+void plc_fault_clear(void);
+/* {"code":..,"kind":"..","task":..,"taskName":"..","safeMode":..,"count":..,"detail":..}; bytes written. */
+size_t plc_fault_json(char *out, size_t cap);
 
 /**
  * @brief Get the signal number that caused the last PLC crash.

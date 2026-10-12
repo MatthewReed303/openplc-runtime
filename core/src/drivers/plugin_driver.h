@@ -53,6 +53,13 @@ typedef int (*plugin_retain_load_func_t)(const char *program_md5, uint16_t md5_l
 /* Optional third: commit anything still held, now. A plugin without it is
  * assumed to commit inside save(), which is where durability belongs anyway. */
 typedef int (*plugin_retain_flush_func_t)(void);
+/* Optional fourth: how often the store wants the values. PLC_RETAIN_MODE_EVERY_SCAN
+ * (the contract above, the default when absent: an NVRAM-backed store) or
+ * PLC_RETAIN_MODE_PERIODIC (a store that commits on its own period: the values
+ * are then handed over about once a second, packed outside the scan). */
+#define PLC_RETAIN_MODE_EVERY_SCAN 0
+#define PLC_RETAIN_MODE_PERIODIC   1
+typedef int (*plugin_retain_mode_func_t)(void);
 
 typedef struct
 {
@@ -69,6 +76,7 @@ typedef struct
     plugin_retain_save_func_t  retain_save;
     plugin_retain_load_func_t  retain_load;
     plugin_retain_flush_func_t retain_flush;
+    plugin_retain_mode_func_t  retain_mode;
 } plugin_funct_bundle_t;
 
 // Plugin instance structure
@@ -135,6 +143,8 @@ int plugin_driver_retain_save(plugin_instance_t *store, const uint8_t *blob, uin
 int plugin_driver_retain_load(plugin_instance_t *store, const char *program_md5, uint16_t md5_len,
                               uint8_t *out, uint16_t cap, uint16_t *out_len);
 int plugin_driver_retain_flush(plugin_instance_t *store);
+/* PLC_RETAIN_MODE_*; EVERY_SCAN when the plugin does not say. */
+int plugin_driver_retain_mode(plugin_instance_t *store);
 
 // Route a command to a specific plugin by name (for async commands like scan)
 int plugin_driver_execute_command(plugin_driver_t *driver, const char *plugin_name,

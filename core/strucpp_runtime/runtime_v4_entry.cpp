@@ -79,6 +79,18 @@ extern "C" {
 char strucpp_program_md5[] = PROGRAM_MD5;
 }
 
+// Outputs on STOP and in ERROR, the project's setting: 1 holds every output at
+// its last value, 0 switches them off (the default; defines.h then has no
+// line). The core asks when the PLC stops (plc_state_manager.cpp); the firmware
+// reads the same OPENPLC_OUTPUTS_ON_STOP.
+#ifndef OPENPLC_OUTPUTS_ON_STOP
+#define OPENPLC_OUTPUTS_ON_STOP 0
+#endif
+extern "C" int strucpp_outputs_on_stop(void)
+{
+    return OPENPLC_OUTPUTS_ON_STOP;
+}
+
 // Advances the strucpp scan-cycle clock on the CALLING thread. Kept for
 // single-threaded hosts; the GCD dispatcher uses strucpp_set_current_time
 // per worker because __CURRENT_TIME_NS is thread_local when STRUCPP_THREADED.
@@ -188,6 +200,43 @@ extern "C" size_t strucpp_retain_blob_size2(void) {
 /** Serialise every retained leaf as format 2. Returns bytes written, 0 on failure. */
 extern "C" size_t strucpp_retain_pack2(uint8_t* out, size_t cap) {
     return strucpp::retain::pack2(out, cap, retain_host(retain_no_write));
+}
+
+// The same blob packed WHILE the tasks run, for a store that saves on its own
+// period (the built-in file store): no task waits for it. Each value is read
+// until two reads agree, so none is stored half old, half new; values may come
+// from consecutive scans. A scan-consistent pack is strucpp_retain_pack2, at stop.
+static const int kLiveTries = 8;
+
+static uint16_t retain_read_leaf_live(uint8_t arr, uint16_t elem, uint8_t* dest) {
+    uint8_t again[16];
+    uint16_t n = 0;
+    for (int t = 0; t < kLiveTries; ++t) {
+        n = strucpp::debug::handle_read(arr, elem, dest);
+        if (n == 0 || n > sizeof again) return n;
+        if (strucpp::debug::handle_read(arr, elem, again) == n && std::memcmp(dest, again, n) == 0) return n;
+    }
+    return n;
+}
+
+static uint16_t retain_read_text_live(uint8_t arr, uint16_t elem, uint8_t* dest, uint16_t cap) {
+    static thread_local uint8_t again[1024];
+    uint16_t n = 0;
+    for (int t = 0; t < kLiveTries; ++t) {
+        n = strucpp::debug::handle_read_text(arr, elem, dest, cap);
+        if (cap > sizeof again) return n;
+        const uint16_t m = strucpp::debug::handle_read_text(arr, elem, again, cap);
+        if (m == n && std::memcmp(dest, again, n) == 0) return n;
+    }
+    return n;
+}
+
+/** strucpp_retain_pack2, safe while the tasks run (see above). */
+extern "C" size_t strucpp_retain_pack2_live(uint8_t* out, size_t cap) {
+    strucpp::retain::Host host = retain_host(retain_no_write);
+    host.read      = retain_read_leaf_live;
+    host.read_text = retain_read_text_live;
+    return strucpp::retain::pack2(out, cap, host);
 }
 
 /**

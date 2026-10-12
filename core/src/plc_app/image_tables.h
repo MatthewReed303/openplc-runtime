@@ -77,6 +77,15 @@ extern "C"
      * format-1 path above is taken. */
     extern size_t   (*ext_strucpp_retain_blob_size2)(void);
     extern size_t   (*ext_strucpp_retain_pack2)     (uint8_t *out, size_t cap);
+    /* pack2 while the tasks run (each value read until two reads agree); NULL
+     * in a program built before it. */
+    extern size_t   (*ext_strucpp_retain_pack2_live)(uint8_t *out, size_t cap);
+    /* Outputs on STOP and in ERROR: PLC_OUTPUTS_HOLD (1) holds them at their
+     * last values, anything else switches them off. NULL in a program built
+     * before it, which is off. */
+#define PLC_OUTPUTS_OFF  0
+#define PLC_OUTPUTS_HOLD 1
+    extern int      (*ext_strucpp_outputs_on_stop)(void);
     extern uint8_t  (*ext_strucpp_retain_unpack2)   (const uint8_t *blob, size_t len,
                                                      uint8_t (*write_leaf)(uint8_t, uint16_t,
                                                                            const uint8_t *, uint16_t),

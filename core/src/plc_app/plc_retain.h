@@ -231,6 +231,17 @@ void plc_retain_read(void);
 void plc_retain_save(void);
 
 /**
+ * The PLC is about to run: for a store that saves on its own period (the file
+ * store, or a plugin whose retain_mode() says so) start the thread that hands
+ * it the values about once a second, packed while the tasks run (no task waits
+ * for it). plc_retain_save() then does nothing; plc_retain_flush() stops the
+ * thread and hands over a pack made with every task stopped. A store that wants
+ * every scan (the default for a plugin: an NVRAM-backed one) keeps
+ * plc_retain_save() at the end of every frame. Call after plc_retain_read().
+ */
+void plc_retain_run_start(void);
+
+/**
  * @brief Ask the driver to commit anything it is still holding, now.
  *
  * Called once as the program is unloaded, after the cycle thread has been

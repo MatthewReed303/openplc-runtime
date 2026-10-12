@@ -248,6 +248,16 @@ static void format_switch_response(char *response, size_t response_size)
         strncpy(response, "SWITCH:STOP\n", response_size);
 }
 
+// The first fault since the last start, as FAULT:<json> (plc_fault_json).
+static void format_fault_response(char *response, size_t response_size)
+{
+    char json[256];
+    if (plc_fault_json(json, sizeof(json)) > 0)
+        snprintf(response, response_size, "FAULT:%s\n", json);
+    else
+        strncpy(response, "FAULT:ERROR\n", response_size);
+}
+
 // What the last start did with retained values, as RETAIN:<json>. A read of a
 // snapshot under its own lock, so it is answered mid-transition like STATUS.
 static void format_retain_response(char *response, size_t response_size)
@@ -282,6 +292,10 @@ void handle_unix_socket_commands(const char *command, char *response, size_t res
         else if (strcmp(command, "RETAIN") == 0)
         {
             format_retain_response(response, response_size);
+        }
+        else if (strcmp(command, "FAULT") == 0)
+        {
+            format_fault_response(response, response_size);
         }
         else
         {
@@ -371,6 +385,10 @@ void handle_unix_socket_commands(const char *command, char *response, size_t res
     else if (strcmp(command, "RETAIN") == 0)
     {
         format_retain_response(response, response_size);
+    }
+    else if (strcmp(command, "FAULT") == 0)
+    {
+        format_fault_response(response, response_size);
     }
     else if (strcmp(command, "STATS") == 0)
     {

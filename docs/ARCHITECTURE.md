@@ -172,7 +172,12 @@ defaults of the constants in `core/src/plc_app/task_policy.h`.
    program code then gets `SIGUSR2`, whose handler jumps to the task's recovery
    point. A stop that aborted a task lands in ERROR. On every stop, plugin writes
    are fenced off (the journal is closed), all `%Q` outputs are written to 0 and
-   pushed by a final I/O cycle, and held for 500 ms before plugins stop. Runtime
+   pushed by a final I/O cycle, and held for 500 ms before plugins stop. With the
+   project's *Outputs on STOP / error* set to *Hold last value*
+   (`OPENPLC_OUTPUTS_ON_STOP 1` in the program's `defines.h`, read through
+   `strucpp_outputs_on_stop`), the outputs instead keep the values the last scans
+   gave them: no zeroing and no final cycle (a plugin that switches its outputs
+   off when it stops still does). Retained values are kept either way. Runtime
    code reached from IEC bodies that must not be interrupted (the Python block
    loader) blocks `SIGUSR2`; user C function blocks are not protected, and an abort
    landing inside one that holds a C-library lock ends in layer 3.

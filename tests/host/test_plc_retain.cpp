@@ -31,6 +31,8 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <thread>
+#include <chrono>
 
 #include <unistd.h>
 
@@ -112,6 +114,7 @@ uint8_t  (*ext_strucpp_retain_unpack)(const uint8_t *, size_t,
     nullptr;
 size_t (*ext_strucpp_retain_blob_size2)(void)         = nullptr;
 size_t (*ext_strucpp_retain_pack2)(uint8_t *, size_t) = nullptr;
+size_t (*ext_strucpp_retain_pack2_live)(uint8_t *, size_t) = nullptr;
 uint8_t (*ext_strucpp_retain_unpack2)(const uint8_t *, size_t,
                                       uint8_t (*)(uint8_t, uint16_t, const uint8_t *, uint16_t),
                                       void *, size_t) = nullptr;
@@ -221,6 +224,19 @@ extern "C" int plugin_driver_retain_flush(plugin_instance_t *)
     return 0;
 }
 
+static int g_plugin_mode = PLC_RETAIN_MODE_EVERY_SCAN;
+extern "C" int plugin_driver_retain_mode(plugin_instance_t *) { return g_plugin_mode; }
+
+// The program's live pack: the same blob, filled differently so a test can tell
+// which of the two packs reached the store.
+static uint8_t g_live_fill = 0x33;
+static size_t  so_pack_live(uint8_t *out, size_t cap)
+{
+    if (cap < g_blob_size) return 0;
+    memset(out, g_live_fill, g_blob_size);
+    return g_blob_size;
+}
+
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
@@ -253,6 +269,8 @@ static void reset(bool plugin = true)
     g_unpacked.clear();
     g_report_size     = 0;
     g_external_writes = 0;
+    g_plugin_mode     = PLC_RETAIN_MODE_EVERY_SCAN;
+    ext_strucpp_retain_pack2_live = nullptr;
     g_blob_size       = 20;
     g_pack_fill       = 0x11;
     g_next_report     = plc_retain_report_t{};
@@ -610,6 +628,69 @@ static void case_cold_start()
     CHECK(g_saves == 0 && g_loads == 0, "no store to touch");
 }
 
+// ---------------------------------------------------------------------------
+// Every scan or periodic: a store that commits on its own period gets the values
+// packed off the scan (a thread, once a second); one that wants every scan (an
+// NVRAM-backed plugin, the default) keeps the per-frame save.
+// ---------------------------------------------------------------------------
+static void case_modes()
+{
+    g_case = "a plugin store keeps the every-scan contract when it does not say";
+    reset();
+    load_program(true, 3);
+    ext_strucpp_retain_pack2_live = so_pack_live;
+    plc_retain_init();
+    plc_retain_run_start();
+    plc_retain_save();
+    plc_retain_save();
+    CHECK(g_saves == 2, "one save per frame");
+    CHECK(status().find("\"mode\":\"every-scan\"") != std::string::npos, "status: every-scan");
+    plc_retain_flush();
+    CHECK(g_saves == 2 && g_flushes == 1, "the stop only flushes");
+
+    g_case = "a plugin that asks for periodic is fed off the scan, and the stop is consistent";
+    reset();
+    load_program(true, 3);
+    ext_strucpp_retain_pack2_live = so_pack_live;
+    g_plugin_mode                 = PLC_RETAIN_MODE_PERIODIC;
+    plc_retain_init();
+    CHECK(status().find("\"mode\":\"periodic\"") != std::string::npos, "status: periodic");
+    plc_retain_save();
+    CHECK(g_saves == 0, "nothing on the scan path");
+    plc_retain_run_start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+    CHECK(g_saves >= 1 && g_last_saved == std::vector<uint8_t>(20, 0x33), "the live pack reached the store");
+    const int live_saves = g_saves;
+    plc_retain_flush();
+    CHECK(g_saves == live_saves + 1 && g_last_saved == std::vector<uint8_t>(20, 0x11),
+          "the stop hands over a pack made with the tasks stopped");
+    CHECK(g_flushes == 1, "then flushes");
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    CHECK(g_saves == live_saves + 1, "the thread has ended");
+
+    g_case = "a program without the live pack stays every scan";
+    reset();
+    load_program(true, 3);
+    g_plugin_mode = PLC_RETAIN_MODE_PERIODIC;
+    plc_retain_init();
+    plc_retain_save();
+    CHECK(g_saves == 1, "per-frame save, as before");
+    CHECK(status().find("\"mode\":\"every-scan\"") != std::string::npos, "status: every-scan");
+
+    g_case = "the built-in file store is periodic";
+    reset(false);
+    load_program(true, 3);
+    ext_strucpp_retain_pack2_live = so_pack_live;
+    FILE *f = fopen("retain.conf", "w");
+    fprintf(f, "enabled=1\npath=%s/retain.bin\nflush_seconds=60\n", g_dir.c_str());
+    fclose(f);
+    plc_retain_init();
+    CHECK(status().find("\"mode\":\"periodic\"") != std::string::npos, "status: periodic");
+    plc_retain_run_start();
+    plc_retain_flush();
+    plc_retain_file_store_stop();
+}
+
 int main()
 {
     char tmpl[] = "/tmp/retain-test-XXXXXX";
@@ -630,6 +711,7 @@ int main()
     case_report_logging();
     case_store_answers();
     case_cold_start();
+    case_modes();
 
     reset();
     if (chdir("/") == 0) rmdir(g_dir.c_str());

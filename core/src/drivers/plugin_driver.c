@@ -1346,6 +1346,7 @@ int native_plugin_get_symbols(plugin_instance_t *plugin)
     native_bundle->retain_save  = (plugin_retain_save_func_t)dlsym(handle, "retain_save");
     native_bundle->retain_load  = (plugin_retain_load_func_t)dlsym(handle, "retain_load");
     native_bundle->retain_flush = (plugin_retain_flush_func_t)dlsym(handle, "retain_flush");
+    native_bundle->retain_mode  = (plugin_retain_mode_func_t)dlsym(handle, "retain_mode");
 
     // Store the native bundle and handle in the plugin instance
     plugin->native_plugin = native_bundle;
@@ -1428,6 +1429,14 @@ int plugin_driver_retain_flush(plugin_instance_t *store)
     // success, not a failure to report on every stop.
     if (!store || !store->native_plugin || !store->native_plugin->retain_flush) return 0;
     return store->native_plugin->retain_flush();
+}
+
+int plugin_driver_retain_mode(plugin_instance_t *store)
+{
+    // Optional fourth hook. Absent, the store keeps the every-scan contract.
+    if (!store || !store->native_plugin || !store->native_plugin->retain_mode) return PLC_RETAIN_MODE_EVERY_SCAN;
+    return store->native_plugin->retain_mode() == PLC_RETAIN_MODE_PERIODIC ? PLC_RETAIN_MODE_PERIODIC
+                                                                           : PLC_RETAIN_MODE_EVERY_SCAN;
 }
 
 void plugin_driver_cycle_start(plugin_driver_t *driver)

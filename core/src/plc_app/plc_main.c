@@ -49,6 +49,26 @@ static void handle_sigusr1(int sig)
     (void)sig;
 }
 
+/* The reason the last run ended in a watchdog exit, as a fault the status
+ * reports (the same codes as a board's safe-mode restart). */
+static void record_watchdog_fault(const char *reason)
+{
+    unsigned    ms = 0;
+    const char *p;
+    char        name[64] = {0};
+    if ((p = strstr(reason, "dispatcher stalled, no tick for ")) != NULL &&
+        sscanf(p + strlen("dispatcher stalled, no tick for "), "%u", &ms) == 1)
+        plc_fault_record(PLC_FAULT_DISPATCHER_STALLED, -1, NULL, ms, true);
+    else if ((p = strstr(reason, "Watchdog: task ")) != NULL &&
+             sscanf(p + strlen("Watchdog: task "), "%63s", name) == 1)
+        plc_fault_record(PLC_FAULT_STOP_TIMEOUT, -1, name, 0, true);
+    else if ((p = strstr(reason, "stop did not complete within ")) != NULL &&
+             sscanf(p + strlen("stop did not complete within "), "%u", &ms) == 1)
+        plc_fault_record(PLC_FAULT_STOP_TIMEOUT, -1, NULL, ms, true);
+    else
+        plc_fault_record(PLC_FAULT_WATCHDOG_EXIT, -1, NULL, 0, true);
+}
+
 int main(int argc, char *argv[])
 {
     bool print_debug = false;
@@ -132,6 +152,7 @@ int main(int argc, char *argv[])
             log_warn("Could not remove %s: %s", PLC_WATCHDOG_FAULT_MARKER, strerror(errno));
         safe_mode   = true;
         after_fault = true;
+        record_watchdog_fault(reason);
     }
     if (after_fault && !safe_mode)
     {

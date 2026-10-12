@@ -146,6 +146,26 @@ def parse_retain_status(retain_response: Optional[str]) -> Optional[dict]:
     return parsed if isinstance(parsed, dict) else None
 
 
+def parse_fault_status(fault_response: Optional[str]) -> Optional[dict]:
+    """
+    Parse the FAULT response from the runtime: ``FAULT:<json>``. Returns the
+    fault, or None when there is none (code 0) or the response is unusable.
+    """
+    if fault_response is None:
+        return None
+    value = fault_response.strip()
+    if not value.startswith("FAULT:{"):
+        return None
+    try:
+        parsed = json.loads(value[len("FAULT:") :])
+    except json.JSONDecodeError as e:
+        logger.warning("Unparseable FAULT response %r: %s", value, e)
+        return None
+    if not isinstance(parsed, dict) or not parsed.get("code"):
+        return None
+    return parsed
+
+
 def handle_retain_status(data: dict) -> dict:
     """
     What the last PLC start did with retained values: warm or cold, the
@@ -228,6 +248,12 @@ def handle_status(data: dict) -> dict:
     switch_position = parse_switch_position(runtime_manager.switch_plc())
     if switch_position is not None:
         result["switchPosition"] = switch_position
+
+    # The first fault since the last start (additive key, absent when none): a
+    # stuck task, a task a runtime error ended, a safe-mode restart's reason.
+    fault = parse_fault_status(runtime_manager.fault_status())
+    if fault is not None:
+        result["fault"] = fault
 
     # Only fetch timing stats if explicitly requested via include_stats parameter.
     # This avoids acquiring the stats mutex on every status poll, which could
