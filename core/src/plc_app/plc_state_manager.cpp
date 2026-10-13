@@ -41,6 +41,8 @@ extern "C" {
 #include "plcapp_manager.h"
 #include "scan_cycle_manager.h"
 #include "task_policy.h"
+
+#include <unistd.h>
 #include "utils/log.h"
 #include "utils/rt_mutex.h"
 #include "utils/utils.h"
@@ -304,6 +306,11 @@ static void plc_task_body(PlcTaskCtx *ctx)
         {
             log_warn("[task %s] pthread_setaffinity_np failed: %s",
                      ctx->name, strerror(errno));
+        }
+        else
+        {
+            log_info("[task %s] CPU affinity mask 0x%llx", ctx->name,
+                     (unsigned long long)ctx->cpu_affinity_mask);
         }
 #else
         log_info("[task %s] CPU affinity requested but unsupported on this platform",
@@ -831,7 +838,21 @@ void *plc_cycle_thread(void *arg)
                 ctx->idx               = flat_idx;
                 ctx->interval_ns       = tk.interval_ns > 0 ? tk.interval_ns : (int64_t)base_ns;
                 ctx->priority          = tk.priority;
-                ctx->cpu_affinity_mask = 0;       /* Phase 8 will plumb this from CPU_AFFINITY */
+                {
+                    /* The task's Core setting: pinned to that CPU, else Auto. */
+                    const int32_t core = ext_strucpp_task_core
+                                             ? ext_strucpp_task_core((uint32_t)r, (uint32_t)t)
+                                             : -1;
+                    bool refused = false;
+                    ctx->cpu_affinity_mask =
+                        plc_task_affinity_mask(core, sysconf(_SC_NPROCESSORS_ONLN), &refused);
+                    if (refused)
+                    {
+                        log_warn("[task %s] core %d is not on this machine (%ld CPUs): "
+                                 "running on Auto",
+                                 tk.name ? tk.name : "?", (int)core, sysconf(_SC_NPROCESSORS_ONLN));
+                    }
+                }
                 ctx->is_fastest_task   = false;   /* set below */
                 ctx->task_handle       = &tk;
                 if (tk.name && tk.name[0] != '\0')

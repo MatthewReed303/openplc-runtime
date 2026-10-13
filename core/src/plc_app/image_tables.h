@@ -86,6 +86,8 @@ extern "C"
 #define PLC_OUTPUTS_OFF  0
 #define PLC_OUTPUTS_HOLD 1
     extern int      (*ext_strucpp_outputs_on_stop)(void);
+    /* The task's CPU core ({CORE := n}), -1 = Auto; NULL when no task has one. */
+    extern int32_t  (*ext_strucpp_task_core)(uint32_t resource, uint32_t task);
     extern uint8_t  (*ext_strucpp_retain_unpack2)   (const uint8_t *blob, size_t len,
                                                      uint8_t (*write_leaf)(uint8_t, uint16_t,
                                                                            const uint8_t *, uint16_t),

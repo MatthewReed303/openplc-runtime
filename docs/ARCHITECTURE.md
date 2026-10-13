@@ -85,7 +85,10 @@ EMPTY → INIT → RUNNING ⟷ STOPPED → ERROR
 1. **Main Thread**: Initialization and signal handling
 2. **Unix Socket Thread**: Accepts and processes commands
 3. **PLC Cycle Thread / Dispatcher**: Loads the program, then runs the GCD master-tick dispatcher at SCHED_FIFO 98
-4. **Task Threads**: One per IEC TASK, SCHED_FIFO 49 - IEC priority (IEC 0..48, clamped)
+4. **Task Threads**: One per IEC TASK, SCHED_FIFO 49 - IEC priority (IEC 0..48, clamped). A task with a
+   Core setting (`TASK t(...) {CORE := n};`, an IEC §6.2 pragma, exported by the program as the optional
+   `strucpp_task_core()`) is pinned to CPU n; Auto, or a CPU the machine lacks (logged), is not pinned
+   (`plc_task_affinity_mask`, `task_policy.c`). The bare-metal firmware places tasks by the same rule.
 5. **Stats Thread**: Logs performance metrics
 6. **Watchdog Thread**: SCHED_FIFO 99; bounds stops and detects a stalled dispatcher
 7. **Log Thread**: Manages log socket connection

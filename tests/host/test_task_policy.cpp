@@ -45,6 +45,20 @@ int main()
     CHECK(PLC_FIFO_WATCHDOG > PLC_FIFO_DISPATCHER, "watchdog above dispatcher");
     CHECK(PLC_FIFO_DISPATCHER > PLC_FIFO_TASK_MAX, "dispatcher above every task");
 
+    // A task's Core setting (`TASK t(...) {CORE := n};`, strucpp_task_core()):
+    // pinned to that CPU where the machine has it, else Auto (no pinning, the
+    // kernel decides), reported as refused. The firmware follows the same rule.
+    std::printf("task_policy: task core to CPU affinity\n");
+    bool refused = true;
+    CHECK(plc_task_affinity_mask(-1, 4, &refused) == 0 && !refused, "Auto -> no pinning");
+    CHECK(plc_task_affinity_mask(0, 4, &refused) == 0x1 && !refused, "core 0 -> CPU 0");
+    CHECK(plc_task_affinity_mask(3, 4, &refused) == 0x8 && !refused, "core 3 -> CPU 3");
+    CHECK(plc_task_affinity_mask(4, 4, &refused) == 0 && refused, "core 4 of 4 CPUs -> Auto, refused");
+    CHECK(plc_task_affinity_mask(63, 64, &refused) == (1ULL << 63) && !refused, "core 63 -> CPU 63");
+    CHECK(plc_task_affinity_mask(64, 128, &refused) == 0 && refused, "core 64 is past the mask -> Auto");
+    CHECK(plc_task_affinity_mask(1, 0, &refused) == 0 && refused, "CPU count unknown -> Auto");
+    CHECK(plc_task_affinity_mask(-1, 0, nullptr) == 0, "NULL refused flag accepted");
+
     if (g_failures == 0)
         std::printf("all cases passed\n");
     return g_failures == 0 ? 0 : 1;

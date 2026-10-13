@@ -87,6 +87,7 @@ size_t   (*ext_strucpp_retain_blob_size2) (void)                       = nullptr
 size_t   (*ext_strucpp_retain_pack2)      (uint8_t *, size_t)          = nullptr;
 size_t   (*ext_strucpp_retain_pack2_live) (uint8_t *, size_t)          = nullptr;
 int      (*ext_strucpp_outputs_on_stop)   (void)                       = nullptr;
+int32_t  (*ext_strucpp_task_core)         (uint32_t, uint32_t)         = nullptr;
 uint8_t  (*ext_strucpp_retain_unpack2)    (const uint8_t *, size_t,
                                            uint8_t (*)(uint8_t, uint16_t,
                                                        const uint8_t *, uint16_t),
@@ -248,6 +249,9 @@ extern "C" int symbols_init(PluginManager *pm)
     *(void **)&ext_strucpp_retain_unpack2     = resolve(pm, "strucpp_retain_unpack2",     false);
     /* Optional: Outputs on STOP / error. NULL (a program built before it) is off. */
     *(void **)&ext_strucpp_outputs_on_stop    = resolve(pm, "strucpp_outputs_on_stop",    false);
+    /* Optional: task cores. STruC++ emits it only when a task has one; NULL
+     * (and a program built before it) is every task on Auto. */
+    *(void **)&ext_strucpp_task_core          = resolve(pm, "strucpp_task_core",          false);
     /* Optional: present only on .so's built with strucpp_capabilities bit 2.
      * When NULL the debug-write drain routes every leaf as a global write. */
     *(void **)&ext_strucpp_debug_locate      = resolve(pm, "strucpp_debug_locate",      false);
@@ -693,6 +697,7 @@ void image_tables_clear_null_pointers(void)
     ext_strucpp_retain_pack2_live  = nullptr;
     ext_strucpp_retain_unpack2     = nullptr;
     ext_strucpp_outputs_on_stop    = nullptr;
+    ext_strucpp_task_core          = nullptr;
     ext_strucpp_get_located_vars      = nullptr;
     ext_strucpp_get_located_var_count = nullptr;
     g_config_ptr = nullptr;

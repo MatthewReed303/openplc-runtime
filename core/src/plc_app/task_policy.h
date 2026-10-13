@@ -78,6 +78,22 @@ extern "C"
      */
     int plc_task_fifo_priority(int iec_priority, bool *clamped);
 
+    /**
+     * @brief The CPU affinity of a task from its Core setting.
+     *
+     * The project's `TASK t(...) {CORE := n};` (an IEC 61131-3 §6.2 pragma; the
+     * program exports it as strucpp_task_core()) pins the task's thread to CPU
+     * n. Auto (-1), a CPU the machine lacks, or one past the 64-bit mask is no
+     * pinning (the kernel decides), as before the setting existed; the
+     * bare-metal firmware follows the same rule (plc_core_place.h).
+     *
+     * @param core    the task's core, -1 for Auto
+     * @param cpus    CPUs online (sysconf(_SC_NPROCESSORS_ONLN)); <= 0 unknown
+     * @param refused set to true when a core was set but cannot be used; may be NULL
+     * @return the affinity mask, 0 = no pinning
+     */
+    uint64_t plc_task_affinity_mask(int32_t core, long cpus, bool *refused);
+
 #ifdef __cplusplus
 }
 #endif

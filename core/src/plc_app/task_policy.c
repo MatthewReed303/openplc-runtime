@@ -21,3 +21,12 @@ int plc_task_fifo_priority(int iec_priority, bool *clamped)
         *clamped = out;
     return PLC_FIFO_TASK_MAX - p;
 }
+
+uint64_t plc_task_affinity_mask(int32_t core, long cpus, bool *refused)
+{
+    const bool set = core >= 0;
+    const bool ok  = set && core < 64 && (long)core < cpus;
+    if (refused)
+        *refused = set && !ok;
+    return ok ? (1ULL << core) : 0;
+}
