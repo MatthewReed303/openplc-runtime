@@ -51,6 +51,8 @@ typedef struct PlcTaskCtx
     int64_t               interval_ns;
     int                   priority;           /* IEC TASK priority, mapped to SCHED_FIFO */
     uint64_t              cpu_affinity_mask;  /* 0 = no pinning, kernel decides */
+    bool                  stop_on_stuck;      /* a stuck scan stops the PLC (the default) */
+    size_t                stack_bytes;        /* the thread's stack, 0 = the default */
     bool                  is_fastest_task;    /* retained for STATS; housekeeping is on the dispatcher */
     void                 *task_handle;        /* opaque strucpp::TaskInstance* */
     pthread_t             thread;
@@ -65,6 +67,8 @@ typedef struct PlcTaskCtx
     plc_atomic_long_t     completed;
     plc_atomic_long_t     overrun_count;
     plc_atomic_long_t     stuck_ticks;     /* consecutive due ticks found still in one scan */
+    plc_atomic_long_t     stuck_running;   /* 1 while past the stuck limit, kept running (reported) */
+    plc_atomic_long_t     stuck_count;     /* times so since the start */
     plc_atomic_long_t     exited;          /* 1 once the thread function has returned */
     plc_atomic_i64_t      release_ns;      /* CLOCK_MONOTONIC time of the last release */
 
@@ -238,6 +242,8 @@ void plc_force_error_state(void);
 #define PLC_FAULT_STOP_TIMEOUT       0x13 /* a task did not finish its scan on a stop */
 #define PLC_FAULT_TASK_ENDED         0x14 /* a runtime error ended a task; the others keep running */
 #define PLC_FAULT_WATCHDOG_EXIT      0x15 /* any other watchdog exit: safe-mode restart */
+#define PLC_FAULT_TASK_STUCK_RUNNING 0x16 /* a task stuck in one scan, set not to stop the PLC: reported,
+                                           * the PLC keeps running; any later fault replaces it */
 /* PLC_FAULT_TASK_ENDED details. */
 #define PLC_TASK_ENDED_NULL_REFERENCE 0
 #define PLC_TASK_ENDED_ARRAY_BOUNDS   1

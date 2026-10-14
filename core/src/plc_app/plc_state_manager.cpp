@@ -150,7 +150,10 @@ static struct
 void plc_fault_record(uint8_t code, int task, const char *task_name, uint32_t detail, bool safe_mode)
 {
     std::lock_guard<std::mutex> guard(g_fault_lock);
-    if (g_fault.code == PLC_FAULT_NONE)
+    /* A stuck task kept running (Stop PLC if stuck: No) is reported only; any later
+     * fault takes its place, so the status always says why the PLC stopped. */
+    if (g_fault.code == PLC_FAULT_NONE ||
+        (g_fault.code == PLC_FAULT_TASK_STUCK_RUNNING && code != PLC_FAULT_TASK_STUCK_RUNNING))
     {
         g_fault.code      = code;
         g_fault.task      = task;
@@ -183,6 +186,7 @@ static const char *fault_kind(uint8_t code)
     case PLC_FAULT_STOP_TIMEOUT:       return "stop-timeout";
     case PLC_FAULT_TASK_ENDED:         return "task-ended";
     case PLC_FAULT_WATCHDOG_EXIT:      return "watchdog-exit";
+    case PLC_FAULT_TASK_STUCK_RUNNING: return "task-stuck-running";
     default:                           return "unknown";
     }
 }
@@ -450,6 +454,27 @@ static void *plc_task_thread(void *arg)
     return nullptr;
 }
 
+/* A task past the stuck limit that is set not to stop the PLC ({STOP_ON_STUCK := FALSE}):
+ * logged and recorded once until it next finishes its scan; the PLC and the other tasks
+ * keep running. Its skipped releases still count as overruns. */
+static void report_stuck_running(PlcTaskCtx *c, bool first_scan)
+{
+    if (c->stuck_running.exchange(1, std::memory_order_relaxed) != 0) return;
+    c->stuck_count.fetch_add(1, std::memory_order_relaxed);
+    const int64_t ms =
+        (monotonic_ns() - c->release_ns.load(std::memory_order_acquire)) / NS_PER_MS;
+    if (first_scan)
+        log_warn("[task %s] first scan still running after %d ms; set not to stop the PLC: "
+                 "the PLC and the other tasks keep running",
+                 c->name, PLC_FIRST_SCAN_TIMEOUT_MS);
+    else
+        log_warn("[task %s] stuck in one scan for %d periods (%lld ms); set not to stop the PLC: "
+                 "the PLC and the other tasks keep running",
+                 c->name, PLC_TASK_STUCK_PERIODS, (long long)ms);
+    plc_fault_record(PLC_FAULT_TASK_STUCK_RUNNING, (int)(c - plc_tasks), c->name,
+                     (uint32_t)(ms > 0 ? ms : 0), false);
+}
+
 static bool task_in_scan(const PlcTaskCtx *c)
 {
     return c->released.load(std::memory_order_relaxed) !=
@@ -527,7 +552,9 @@ static void abort_task(PlcTaskCtx *c)
 }
 
 /* Wakes every worker, lets each in-flight scan run until PLC_TASK_STUCK_PERIODS of its own
- * periods after its release, aborts the ones still running, then joins and frees the array. */
+ * periods after its release (a task set not to stop the PLC when stuck: at least
+ * PLC_STOP_WAIT_KEEP_RUNNING_MS after the stop), aborts the ones still running, then joins and
+ * frees the array. */
 static void reap_task_threads(void)
 {
     log_info("Stopping %zu PLC task thread(s)", plc_task_count);
@@ -541,8 +568,9 @@ static void reap_task_threads(void)
     for (size_t i = 0; i < plc_task_count; ++i)
     {
         PlcTaskCtx   *c = &plc_tasks[i];
-        const int64_t scan_deadline =
-            c->release_ns.load(std::memory_order_acquire) + task_scan_limit_ns(c);
+        const int64_t scan_deadline = plc_task_stop_deadline(
+            c->release_ns.load(std::memory_order_acquire), task_scan_limit_ns(c), t_reap,
+            (int64_t)PLC_STOP_WAIT_KEEP_RUNNING_MS * NS_PER_MS, c->stop_on_stuck);
         const int64_t idle_deadline = (scan_deadline > t_reap ? scan_deadline : t_reap) +
                                       PLC_TASK_ABORT_TIMEOUT_MS * NS_PER_MS;
         if (!wait_task_exit(c, scan_deadline, idle_deadline))
@@ -853,6 +881,23 @@ void *plc_cycle_thread(void *arg)
                                  tk.name ? tk.name : "?", (int)core, sysconf(_SC_NPROCESSORS_ONLN));
                     }
                 }
+                {
+                    /* The task's "Stop PLC if stuck" and Stack settings, else the defaults. */
+                    ctx->stop_on_stuck = ext_strucpp_task_stop_on_stuck
+                                             ? ext_strucpp_task_stop_on_stuck((uint32_t)r, (uint32_t)t) != 0
+                                             : true;
+                    const uint32_t stack = ext_strucpp_task_stack
+                                               ? ext_strucpp_task_stack((uint32_t)r, (uint32_t)t)
+                                               : 0;
+                    bool refused = false;
+                    ctx->stack_bytes = plc_task_stack_bytes(stack, sysconf(_SC_PAGESIZE), &refused);
+                    if (refused)
+                    {
+                        log_warn("[task %s] stack %u bytes is outside %u..%u: running on the default stack",
+                                 tk.name ? tk.name : "?", (unsigned)stack, PLC_TASK_STACK_MIN,
+                                 PLC_TASK_STACK_MAX);
+                    }
+                }
                 ctx->is_fastest_task   = false;   /* set below */
                 ctx->task_handle       = &tk;
                 if (tk.name && tk.name[0] != '\0')
@@ -878,6 +923,8 @@ void *plc_cycle_thread(void *arg)
                 ctx->completed.store(0,     std::memory_order_relaxed);
                 ctx->overrun_count.store(0, std::memory_order_relaxed);
                 ctx->stuck_ticks.store(0,   std::memory_order_relaxed);
+                ctx->stuck_running.store(0, std::memory_order_relaxed);
+                ctx->stuck_count.store(0,   std::memory_order_relaxed);
                 ctx->exited.store(0,        std::memory_order_relaxed);
                 ctx->release_ns.store(0,    std::memory_order_relaxed);
                 ctx->in_body = 0;
@@ -929,9 +976,33 @@ void *plc_cycle_thread(void *arg)
     size_t spawned = 0;
     for (; spawned < plc_task_count; ++spawned)
     {
-        if (pthread_create(&plc_tasks[spawned].thread, NULL,
-                           plc_task_thread, &plc_tasks[spawned]) != 0)
+        /* A task with a Stack setting gets a thread of that size; the default otherwise,
+         * or when the size cannot be set (logged). */
+        pthread_attr_t  attr;
+        pthread_attr_t *attrp = NULL;
+        if (plc_tasks[spawned].stack_bytes != 0)
         {
+            pthread_attr_init(&attr);
+            const int ss_rc = pthread_attr_setstacksize(&attr, plc_tasks[spawned].stack_bytes);
+            if (ss_rc == 0)
+            {
+                attrp = &attr;
+                log_info("[task %s] stack %zu bytes", plc_tasks[spawned].name,
+                         plc_tasks[spawned].stack_bytes);
+            }
+            else
+            {
+                pthread_attr_destroy(&attr);
+                log_warn("[task %s] stack %zu bytes cannot be set (%s): running on the default stack",
+                         plc_tasks[spawned].name, plc_tasks[spawned].stack_bytes, strerror(ss_rc));
+            }
+        }
+        const int create_rc = pthread_create(&plc_tasks[spawned].thread, attrp,
+                                             plc_task_thread, &plc_tasks[spawned]);
+        if (attrp) pthread_attr_destroy(attrp);
+        if (create_rc != 0)
+        {
+            errno = create_rc;
             log_error("Failed to spawn task %zu thread: %s",
                       spawned, strerror(errno));
 
@@ -1028,7 +1099,18 @@ void *plc_cycle_thread(void *arg)
                     !task_first_scan_done(c))
                 {
                     const int64_t rel = c->release_ns.load(std::memory_order_acquire);
-                    if (oldest == 0 || rel < oldest) oldest = rel;
+                    /* The watchdog trips only a task that stops the PLC when stuck; one set
+                     * not to is reported here once past the same timeout. */
+                    if (c->stop_on_stuck)
+                    {
+                        if (oldest == 0 || rel < oldest) oldest = rel;
+                    }
+                    else if (plc_task_stuck_action(monotonic_ns() - rel >
+                                                       (int64_t)PLC_FIRST_SCAN_TIMEOUT_MS * NS_PER_MS,
+                                                   false) == PLC_STUCK_REPORT)
+                    {
+                        report_stuck_running(c, true);
+                    }
                 }
             }
             g_first_scan_since_ns.store(oldest, std::memory_order_release);
@@ -1087,6 +1169,7 @@ void *plc_cycle_thread(void *arg)
                      * the worker's matching worker_scan_done() can never drive
                      * g_tasks_running negative. */
                     c->stuck_ticks.store(0, std::memory_order_relaxed);
+                    c->stuck_running.store(0, std::memory_order_relaxed);
                     c->release_ns.store(monotonic_ns(), std::memory_order_release);
                     c->time_at_dispatch = master_time;
                     c->released.store(r + 1, std::memory_order_relaxed);
@@ -1104,8 +1187,12 @@ void *plc_cycle_thread(void *arg)
                     if (task_first_scan_done(c))
                     {
                         long st = c->stuck_ticks.fetch_add(1, std::memory_order_relaxed) + 1;
-                        if (st >= PLC_TASK_STUCK_PERIODS && stuck_idx == SIZE_MAX)
+                        const int action =
+                            plc_task_stuck_action(st >= PLC_TASK_STUCK_PERIODS, c->stop_on_stuck);
+                        if (action == PLC_STUCK_STOP && stuck_idx == SIZE_MAX)
                             stuck_idx = i;
+                        else if (action == PLC_STUCK_REPORT)
+                            report_stuck_running(c, false);
                     }
                     long oc = c->overrun_count.fetch_add(1, std::memory_order_relaxed) + 1;
                     if (oc == 1 || (oc % 50) == 0)
@@ -1128,7 +1215,7 @@ void *plc_cycle_thread(void *arg)
                 {
                     PlcTaskCtx *c = &plc_tasks[i];
                     if (!c->alive.load(std::memory_order_acquire) || !task_in_scan(c) ||
-                        task_first_scan_done(c))
+                        task_first_scan_done(c) || !c->stop_on_stuck)
                         continue;
                     if (stuck_idx == SIZE_MAX ||
                         c->release_ns.load(std::memory_order_acquire) <

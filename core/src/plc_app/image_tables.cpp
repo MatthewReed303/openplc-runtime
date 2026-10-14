@@ -88,6 +88,8 @@ size_t   (*ext_strucpp_retain_pack2)      (uint8_t *, size_t)          = nullptr
 size_t   (*ext_strucpp_retain_pack2_live) (uint8_t *, size_t)          = nullptr;
 int      (*ext_strucpp_outputs_on_stop)   (void)                       = nullptr;
 int32_t  (*ext_strucpp_task_core)         (uint32_t, uint32_t)         = nullptr;
+int32_t  (*ext_strucpp_task_stop_on_stuck)(uint32_t, uint32_t)         = nullptr;
+uint32_t (*ext_strucpp_task_stack)        (uint32_t, uint32_t)         = nullptr;
 uint8_t  (*ext_strucpp_retain_unpack2)    (const uint8_t *, size_t,
                                            uint8_t (*)(uint8_t, uint16_t,
                                                        const uint8_t *, uint16_t),
@@ -252,6 +254,11 @@ extern "C" int symbols_init(PluginManager *pm)
     /* Optional: task cores. STruC++ emits it only when a task has one; NULL
      * (and a program built before it) is every task on Auto. */
     *(void **)&ext_strucpp_task_core          = resolve(pm, "strucpp_task_core",          false);
+    /* Optional: a task's "Stop PLC if stuck" and its stack. STruC++ emits each
+     * only when a task has it; NULL (and a program built before them) is every
+     * task stopping the PLC when stuck, on the default stack. */
+    *(void **)&ext_strucpp_task_stop_on_stuck = resolve(pm, "strucpp_task_stop_on_stuck", false);
+    *(void **)&ext_strucpp_task_stack         = resolve(pm, "strucpp_task_stack",         false);
     /* Optional: present only on .so's built with strucpp_capabilities bit 2.
      * When NULL the debug-write drain routes every leaf as a global write. */
     *(void **)&ext_strucpp_debug_locate      = resolve(pm, "strucpp_debug_locate",      false);
@@ -698,6 +705,8 @@ void image_tables_clear_null_pointers(void)
     ext_strucpp_retain_unpack2     = nullptr;
     ext_strucpp_outputs_on_stop    = nullptr;
     ext_strucpp_task_core          = nullptr;
+    ext_strucpp_task_stop_on_stuck = nullptr;
+    ext_strucpp_task_stack         = nullptr;
     ext_strucpp_get_located_vars      = nullptr;
     ext_strucpp_get_located_var_count = nullptr;
     g_config_ptr = nullptr;

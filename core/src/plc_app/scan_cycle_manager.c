@@ -131,10 +131,13 @@ bool scan_cycle_tracker_snapshot(scan_cycle_tracker_t *tracker, plc_timing_stats
 extern PlcTaskCtx *plc_tasks;
 extern size_t      plc_task_count;
 
+/* `"stuck":true` only for a task stuck now and kept running (its "Stop PLC if
+ * stuck" is No), so every other entry is as it was. */
 static int append_task_entry(char *buffer, size_t buffer_size, size_t offset,
                              const char *name, const plc_timing_stats_t *s,
-                             bool valid)
+                             bool valid, bool stuck)
 {
+    const char *stuck_key = stuck ? ",\"stuck\":true" : "";
     int written;
     if (!valid)
     {
@@ -150,8 +153,8 @@ static int append_task_entry(char *buffer, size_t buffer_size, size_t offset,
                            "\"cycle_latency_min\":null,"
                            "\"cycle_latency_max\":null,"
                            "\"cycle_latency_avg\":null,"
-                           "\"overruns\":0}",
-                           name);
+                           "\"overruns\":0%s}",
+                           name, stuck_key);
     }
     else
     {
@@ -167,12 +170,12 @@ static int append_task_entry(char *buffer, size_t buffer_size, size_t offset,
                            "\"cycle_latency_min\":%" PRId64 ","
                            "\"cycle_latency_max\":%" PRId64 ","
                            "\"cycle_latency_avg\":%" PRId64 ","
-                           "\"overruns\":%" PRId64 "}",
+                           "\"overruns\":%" PRId64 "%s}",
                            name,
                            s->scan_count, s->scan_time_min, s->scan_time_max, s->scan_time_avg,
                            s->cycle_time_min, s->cycle_time_max, s->cycle_time_avg,
                            s->cycle_latency_min, s->cycle_latency_max, s->cycle_latency_avg,
-                           s->overruns);
+                           s->overruns, stuck_key);
     }
     if (written < 0) return 0;
     return written;
@@ -202,7 +205,8 @@ int format_timing_stats_response(char *buffer, size_t buffer_size)
         }
         plc_timing_stats_t snap;
         bool valid = scan_cycle_tracker_snapshot(&plc_tasks[i].tracker, &snap);
-        n = append_task_entry(buffer, buffer_size, offset, plc_tasks[i].name, &snap, valid);
+        const bool stuck = atomic_load_explicit(&plc_tasks[i].stuck_running, memory_order_relaxed) != 0;
+        n = append_task_entry(buffer, buffer_size, offset, plc_tasks[i].name, &snap, valid, stuck);
         if (n <= 0) break;
         offset += (size_t)n;
         if (offset >= buffer_size) break;

@@ -89,6 +89,9 @@ EMPTY → INIT → RUNNING ⟷ STOPPED → ERROR
    Core setting (`TASK t(...) {CORE := n};`, an IEC §6.2 pragma, exported by the program as the optional
    `strucpp_task_core()`) is pinned to CPU n; Auto, or a CPU the machine lacks (logged), is not pinned
    (`plc_task_affinity_mask`, `task_policy.c`). The bare-metal firmware places tasks by the same rule.
+   A task's Stack setting (`{STACK := n}`, the optional `strucpp_task_stack()`) sizes its thread
+   (`pthread_attr_setstacksize`, rounded up to a page); a size outside 64 KB..64 MB, or one the
+   system refuses, is logged and the thread keeps the default stack (`plc_task_stack_bytes`).
 5. **Stats Thread**: Logs performance metrics
 6. **Watchdog Thread**: SCHED_FIFO 99; bounds stops and detects a stalled dispatcher
 7. **Log Thread**: Manages log socket connection
@@ -170,8 +173,18 @@ defaults of the constants in `core/src/plc_app/task_policy.h`.
    trips. Ticks replayed after a late dispatcher count as missed periods too.
    A task's first scan (initialisation, e.g. Python function block start-up) is
    not counted; the main watchdog trips it only if it runs past 10 s.
+   A task whose **Stop PLC if stuck** is No (`TASK t(...) {STOP_ON_STUCK := FALSE};`,
+   exported as the optional `strucpp_task_stop_on_stuck()`; `plc_task_stuck_action`
+   in `task_policy.c`) trips neither: past either limit it is logged and recorded
+   once, until it next finishes a scan (fault `task-stuck-running`, which any later
+   fault replaces; `"stuck":true` in its STATS entry; its skipped releases are
+   overruns), and the PLC and the other tasks keep running. A stop while it is
+   stuck is drained as below. The bare-metal firmware does the same.
 2. **Drain and abort (dispatcher).** On every stop each in-flight scan may run until
-   10 periods after its release (10 s for a first scan). A task still inside IEC
+   10 periods after its release (10 s for a first scan). A task whose **Stop PLC if
+   stuck** is No may run at least 10 s after the stop (`PLC_STOP_WAIT_KEEP_RUNNING_MS`,
+   `plc_task_stop_deadline`), so a stop during a long connect ends as a normal stop;
+   the stop budget's 10 s floor covers it. A task still inside IEC
    program code then gets `SIGUSR2`, whose handler jumps to the task's recovery
    point. A stop that aborted a task lands in ERROR. On every stop, plugin writes
    are fenced off (the journal is closed), all `%Q` outputs are written to 0 and

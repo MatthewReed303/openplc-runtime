@@ -59,6 +59,36 @@ int main()
     CHECK(plc_task_affinity_mask(1, 0, &refused) == 0 && refused, "CPU count unknown -> Auto");
     CHECK(plc_task_affinity_mask(-1, 0, nullptr) == 0, "NULL refused flag accepted");
 
+    // A task's "Stop PLC if stuck" (`{STOP_ON_STUCK := FALSE}`,
+    // strucpp_task_stop_on_stuck()): past the stuck limit the PLC stops, as
+    // always, unless the task is set not to; then it is reported only. The
+    // firmware follows the same rule (plc_core_place.h).
+    std::printf("task_policy: stuck task action\n");
+    CHECK(plc_task_stuck_action(false, true) == PLC_STUCK_NONE, "not past the limit -> nothing");
+    CHECK(plc_task_stuck_action(false, false) == PLC_STUCK_NONE, "not past the limit, set not to stop -> nothing");
+    CHECK(plc_task_stuck_action(true, true) == PLC_STUCK_STOP, "past the limit -> stop the PLC");
+    CHECK(plc_task_stuck_action(true, false) == PLC_STUCK_REPORT, "past the limit, set not to stop -> report");
+
+    // A stop lets a task's scan run to its own limit; one set not to stop the PLC
+    // when stuck at least PLC_STOP_WAIT_KEEP_RUNNING_MS after the stop.
+    std::printf("task_policy: stop deadline\n");
+    CHECK(plc_task_stop_deadline(100, 1000, 500, 10000, true) == 1100, "stops when stuck -> its own limit");
+    CHECK(plc_task_stop_deadline(100, 1000, 500, 10000, false) == 10500, "keeps running -> 10 s after the stop");
+    CHECK(plc_task_stop_deadline(100, 20000, 500, 10000, false) == 20100, "own limit later -> its own limit");
+
+    // A task's Stack setting (`{STACK := n}`, strucpp_task_stack()): n bytes,
+    // rounded up to a page, within the bounds; else the default (0), refused.
+    std::printf("task_policy: task stack\n");
+    CHECK(plc_task_stack_bytes(0, 4096, &refused) == 0 && !refused, "Default -> the default stack");
+    CHECK(plc_task_stack_bytes(65536, 4096, &refused) == 65536 && !refused, "64 KB -> 64 KB");
+    CHECK(plc_task_stack_bytes(100000, 4096, &refused) == 102400 && !refused, "rounded up to a page");
+    CHECK(plc_task_stack_bytes(8192, 4096, &refused) == 0 && refused, "below 64 KB -> default, refused");
+    CHECK(plc_task_stack_bytes(PLC_TASK_STACK_MAX, 4096, &refused) == PLC_TASK_STACK_MAX && !refused,
+          "64 MB -> 64 MB");
+    CHECK(plc_task_stack_bytes(PLC_TASK_STACK_MAX + 1u, 4096, &refused) == 0 && refused,
+          "past 64 MB -> default, refused");
+    CHECK(plc_task_stack_bytes(65537, 0, nullptr) == 69632, "page size unknown -> 4096; NULL flag accepted");
+
     if (g_failures == 0)
         std::printf("all cases passed\n");
     return g_failures == 0 ? 0 : 1;

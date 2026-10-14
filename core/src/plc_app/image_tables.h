@@ -88,6 +88,11 @@ extern "C"
     extern int      (*ext_strucpp_outputs_on_stop)(void);
     /* The task's CPU core ({CORE := n}), -1 = Auto; NULL when no task has one. */
     extern int32_t  (*ext_strucpp_task_core)(uint32_t resource, uint32_t task);
+    /* 1 = a stuck scan of the task stops the PLC, 0 = it is reported and the PLC
+     * keeps running ({STOP_ON_STUCK := b}); NULL when no task has the setting. */
+    extern int32_t  (*ext_strucpp_task_stop_on_stuck)(uint32_t resource, uint32_t task);
+    /* The task's stack in bytes ({STACK := n}), 0 = default; NULL when no task has one. */
+    extern uint32_t (*ext_strucpp_task_stack)(uint32_t resource, uint32_t task);
     extern uint8_t  (*ext_strucpp_retain_unpack2)   (const uint8_t *blob, size_t len,
                                                      uint8_t (*write_leaf)(uint8_t, uint16_t,
                                                                            const uint8_t *, uint16_t),
