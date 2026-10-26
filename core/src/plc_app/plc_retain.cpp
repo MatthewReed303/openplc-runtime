@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Copyright (c) 2026 Autonomy®
 
 /**
@@ -31,6 +31,7 @@ extern "C" {
 #include "utils/utils.h"  // ext_strucpp_program_md5 — the program's identity
 }
 
+#include "../lib/strucpp_abi.hpp"
 #include "debug_write_journal.h"
 #include "image_tables.h"
 #include "plc_retain_file_store.h"
@@ -146,20 +147,22 @@ void log_report(const plc_retain_report_t *r, uint16_t stored_bytes)
              why_text(r->result));
 }
 
-/* Restore via runtime_external_write (not direct IECVar poke): routes a
- * located leaf through the image journal so copy_in won't revert it.
+unsigned g_restored_leaves = 0;
+unsigned g_refused_leaves  = 0;
+
+/* Restore via runtime_external_write_now (not direct IECVar poke): routes a
+ * located leaf through the image journal so copy_in won't revert it, and
+ * applies at once so every value is in place for the first scan.
  * DBGW_OP_WRITE, never a force — a restore must not pin the slot. */
 uint8_t retain_write_leaf(uint8_t arr, uint16_t elem, const uint8_t *bytes, uint16_t len)
 {
-    const int rc = runtime_external_write(arr, elem, (uint8_t)DBGW_OP_WRITE, bytes, len);
-
-    /* Restore runs before any task is released: drain now, or scan 1 runs
-     * on initial values and leaves beyond the queue's capacity are lost. */
-    image_lock();
-    debug_write_journal_drain();
-    image_unlock();
-
-    return rc == 0 ? 0x7E : 0x82;
+    if (runtime_external_write_now(arr, elem, (uint8_t)DBGW_OP_WRITE, bytes, len) == 0)
+    {
+        ++g_restored_leaves;
+        return strucpp::debug::STATUS_OK;
+    }
+    ++g_refused_leaves;
+    return strucpp::debug::STATUS_DATA_TOO_LARGE;
 }
 
 /* Uniform store record (name + 3 fn pointers). Past init() every path
@@ -441,6 +444,8 @@ void plc_retain_read(void)
     const uint16_t got = read_from_store(md5, buf.get(), false);
     if (got == 0) return;
 
+    g_restored_leaves = 0;
+    g_refused_leaves  = 0;
     plc_retain_report_t report = {};
     if (g_v2)
     {
@@ -458,6 +463,12 @@ void plc_retain_read(void)
 
     record_start(PLC_RETAIN_START_WARM, got, &report);
     log_report(&report, got);
+    if (g_refused_leaves != 0)
+    {
+        log_warn("Retain: restored %u of %u retained values — %u could not be written and "
+                 "start at their initial values",
+                 g_restored_leaves, g_restored_leaves + g_refused_leaves, g_refused_leaves);
+    }
 }
 
 void plc_retain_cold_start(void)

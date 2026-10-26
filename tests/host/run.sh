@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 # Copyright (c) 2026 Autonomy®
 
 # Host tests: plain C++17 executables, no framework, no device. For
@@ -15,13 +15,9 @@ CXX="${CXX:-c++}"
 CC="${CC:-cc}"
 CXXFLAGS="-std=c++17 -Wall -Wextra -Wno-unused-parameter -g"
 CFLAGS="-std=gnu11 -Wall -Wextra -Wno-unused-parameter -g"
-INCLUDES="-Icore/src/plc_app -Icore/src"
-# plugin_driver.h reaches Python.h through python_plugin_bridge.h, so a test
-# that includes it needs the interpreter's headers on the path (nothing links
-# against Python).
-if command -v python3-config >/dev/null 2>&1; then
-  INCLUDES="$INCLUDES $(python3-config --includes)"
-fi
+# Python headers: plugin_driver.h includes Python.h.
+PY_INCLUDE=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
+INCLUDES="-Icore/src/plc_app -Icore/src -I$PY_INCLUDE"
 
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
@@ -34,6 +30,8 @@ TESTS=(
   "tests/host/test_rt_mutex.cpp:"
   "tests/host/test_task_policy.cpp:core/src/plc_app/task_policy.c"
   "tests/host/test_image_outputs.cpp:core/src/plc_app/image_tables.cpp:core/src/plc_app/located_globals.c"
+  "tests/host/test_plc_boot.cpp:core/src/plc_app/plc_boot.c:core/src/plc_app/plc_switch.c:core/src/drivers/plugin_plc_requests.c"
+  "tests/host/test_debug_write_journal.cpp:core/src/plc_app/debug_write_journal.cpp"
 )
 
 failures=0

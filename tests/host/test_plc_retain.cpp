@@ -96,10 +96,9 @@ char       *ext_strucpp_program_md5            = g_md5;
 
 extern "C" void image_lock(void) {}
 extern "C" void image_unlock(void) {}
-extern "C" void debug_write_journal_drain(void) {}
 
 static int g_external_writes = 0;
-extern "C" int runtime_external_write(uint8_t, uint16_t, uint8_t op, const uint8_t *, uint16_t)
+extern "C" int runtime_external_write_now(uint8_t, uint16_t, uint8_t op, const uint8_t *, uint16_t)
 {
     if (op == DBGW_OP_WRITE) ++g_external_writes;
     return 0;
